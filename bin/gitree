@@ -302,6 +302,9 @@ _setup_bare_repo() {
                refs/heads/ | head -1)
     [[ -z "$default_branch" ]] && default_branch="main"
 
+    # Pin HEAD to the default branch so bare-repo commands never resolve the wrong target
+    git -C "$bare" symbolic-ref HEAD "refs/heads/$default_branch"
+
     printf 'Creating main worktree on branch: %s\n' "$default_branch"
     git -C "$bare" worktree add "../main" "$default_branch"
 
@@ -352,7 +355,17 @@ _resolve_worktree() {
     printf '%s' "$pdir/.worktrees/$dirname"
 }
 
-# ── List helper (shared between list + pull) ──────────────────────────────────
+# ── List helpers ─────────────────────────────────────────────────────────────
+
+_check_head_drift() {
+    local bare="$1"
+    local bare_head main_branch
+    bare_head=$(git -C "$bare" symbolic-ref --short HEAD 2>/dev/null) || return 0
+    main_branch=$(git -C "$bare/../main" symbolic-ref --short HEAD 2>/dev/null) || return 0
+    [[ "$bare_head" != "$main_branch" ]] || return 0
+    printf '  (HEAD drift: bare HEAD=%s, main/=%s — run: gitree repair-head)\n' \
+        "$bare_head" "$main_branch"
+}
 
 _list_project_worktrees() {
     local bare="$1"
@@ -554,6 +567,7 @@ cmd_list() {
         local pdir="$1"
         printf '\n%s:\n' "$(basename "$pdir")"
         _list_project_worktrees "$pdir/.bare"
+        _check_head_drift "$pdir/.bare"
     }
 
     if [[ -n "$workspace" && -d "$workspace/.bare" ]]; then
@@ -760,6 +774,39 @@ cmd_switch() {
     printf '✓ %s → %s (branch: %s)\n' "$name" "$target" "$branch"
 }
 
+cmd_repair_head() {
+    local workspace="${GITREE_WORKSPACE:-}"
+    [[ -z "$workspace" ]] && { printf 'Error: no .gitree config found\n' >&2; exit 1; }
+
+    _repair_one() {
+        local bare="$1" name="$2"
+        local remote_default
+        remote_default=$(git -C "$bare" remote show origin 2>/dev/null \
+            | grep 'HEAD branch' | sed 's/.*HEAD branch: //')
+        if [[ -z "$remote_default" || "$remote_default" == "(unknown)" ]]; then
+            printf '  %-40s  (skipped — cannot reach origin)\n' "$name"
+            return
+        fi
+        local current
+        current=$(git -C "$bare" symbolic-ref --short HEAD 2>/dev/null || echo "(detached)")
+        if [[ "$current" == "$remote_default" ]]; then
+            printf '  %-40s  ok (HEAD → %s)\n' "$name" "$current"
+        else
+            git -C "$bare" symbolic-ref HEAD "refs/heads/$remote_default"
+            printf '  %-40s  fixed (%s → %s)\n' "$name" "$current" "$remote_default"
+        fi
+    }
+
+    if [[ -d "$workspace/.bare" ]]; then
+        _repair_one "$workspace/.bare" "$(basename "$workspace")"
+    else
+        for pdir in "$workspace"/*/; do
+            [[ -d "$pdir/.bare" ]] || continue
+            _repair_one "$pdir/.bare" "$(basename "$pdir")"
+        done
+    fi
+}
+
 cmd_pull() {
     local name_hint="${1:-}"
     local workspace="${GITREE_WORKSPACE:-}"
@@ -943,7 +990,8 @@ _gitree() {
                 'lock[lock a worktree]' \
                 'unlock[unlock a worktree]' \
                 'install[install gitree globally]' \
-                'completion[print shell completion script]'
+                'completion[print shell completion script]' \
+                'repair-head[reset bare HEAD to remote default branch]'
             ;;
         args)
             case ${words[2]} in
@@ -1011,7 +1059,8 @@ _help() {
 
     printf '%sTools%s\n' "$b" "$r"
     printf '  %sinstall%s [--shell-only] [<dir>]    install gitree globally + wt() shell function\n' "$g" "$r"
-    printf '  %scompletion%s <bash|zsh>             print shell completion script\n\n' "$g" "$r"
+    printf '  %scompletion%s <bash|zsh>             print shell completion script\n' "$g" "$r"
+    printf '  %srepair-head%s                       reset bare HEAD to remote default branch\n\n' "$g" "$r"
 
     printf '%sConfig%s  %s.gitree at workspace root%s\n' "$b" "$r" "$d" "$r"
     printf '  %sSWITCH_PATH%s=<path>               directory where %sswitch%s manages symlinks\n\n' \
@@ -1052,7 +1101,8 @@ main() {
         pull)       shift; cmd_pull "$@" ;;
         lock)       shift; cmd_lock "$@" ;;
         unlock)     shift; cmd_unlock "$@" ;;
-        install)    shift; cmd_install "$@" ;;
+        install)      shift; cmd_install "$@" ;;
+        repair-head)  cmd_repair_head ;;
         completion) shift; cmd_completion "$@" ;;
         -v|--version|version) printf 'gitree %s\n' "$GITREE_VERSION" ;;
         -h|--help|help) _help ;;
