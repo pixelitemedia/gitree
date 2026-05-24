@@ -365,15 +365,15 @@ _list_project_worktrees() {
         /^branch /   { branch=substr($0,8); sub("refs/heads/","",branch) }
         /^HEAD /     { head=substr($0,6) }
         /^$/ {
-            if (wt != "") {
+            if (wt != "" && wtname != ".bare") {
                 lk = ""
                 for (i=1; i<=n; i++) if (larr[i] == wtname) { lk = "  [locked]"; break }
                 if (branch != "")
                     printf "  %-48s  (branch: %s)%s\n", wt, branch, lk
                 else
                     printf "  %-48s  (detached: %s)%s\n", wt, substr(head,1,10), lk
-                wt=""; branch=""; head=""
             }
+            wt=""; branch=""; head=""
         }
     '
 }
