@@ -1,0 +1,22 @@
+{
+  "name": "@pixelitemedia/gitree",
+  "version": "1.0.0",
+  "description": "Bare-repo worktree manager — create, navigate, and switch worktrees with one command",
+  "bin": {
+    "gitree": "bin/gitree"
+  },
+  "files": [
+    "bin/gitree"
+  ],
+  "os": ["darwin", "linux"],
+  "keywords": ["git", "worktree", "bare-repo", "cli", "developer-tools"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pixelitemedia/gitree.git"
+  },
+  "homepage": "https://github.com/pixelitemedia/gitree",
+  "bugs": {
+    "url": "https://github.com/pixelitemedia/gitree/issues"
+  }
+}

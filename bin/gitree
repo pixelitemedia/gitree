@@ -1,0 +1,863 @@
+#!/usr/bin/env bash
+# gitree — bare-repo worktree manager
+#
+# Works inside any bare-repo-with-worktrees project, or anywhere inside one.
+# Reads a .gitree config file (walked up from cwd) for workspace-level settings.
+#
+# Usage:
+#   gitree                                  list worktrees and load state
+#   gitree list                             same
+#   gitree init                             init current dir as gitree workspace root
+#   gitree add [<repo>] [<name>|.]          add a repo as a bare worktree project
+#   gitree convert multi|mono               convert between single- and multi-repo layouts
+#   gitree audit [<project>]                show branches that have no worktree
+#   gitree wt [<project>] <branch>          get or create a worktree; print its path
+#   gitree switch [<project>] [<branch>]    point SWITCH_PATH symlink at a worktree
+#   gitree install [<dir>]                  install gitree globally and the wt() shell fn
+#
+# .gitree config keys (at workspace root):
+#   SWITCH_PATH=/path/to/symlink/dir        managed by `gitree switch` (optional)
+#
+# Shell function — add to your rc for one-word worktree navigation:
+#   wt() { local d; d=$(gitree wt "$@") && cd "$d"; }
+#
+# `gitree install` writes this for you if it can.
+
+set -euo pipefail
+
+# ── Workspace / plugin detection ──────────────────────────────────────────────
+
+# Walk up from dir looking for a .gitree config file
+_find_workspace_root() {
+    local dir="${1:-$PWD}"
+    while [[ "$dir" != "/" ]]; do
+        [[ -f "$dir/.gitree" ]] && { printf '%s' "$dir"; return 0; }
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# Walk up from dir looking for a directory that contains .bare/
+_find_plugin_dir() {
+    local dir="${1:-$PWD}"
+    while [[ "$dir" != "/" ]]; do
+        [[ -d "$dir/.bare" ]] && { printf '%s' "$dir"; return 0; }
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# Load .gitree key=value config into env (expands ~ in values)
+_load_config() {
+    local file="$1/.gitree"
+    [[ -f "$file" ]] || return 0
+    while IFS='=' read -r key val; do
+        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+        key="${key// /}"
+        val="${val/#\~/$HOME}"
+        export "$key"="$val"
+    done < "$file"
+}
+
+# Resolve plugin name + dirs from an optional name hint, falling back to cwd.
+# Sets: GITREE_PLUGIN_NAME, GITREE_PLUGIN_DIR, GITREE_BARE_DIR
+_resolve_plugin() {
+    local name_hint="${1:-}"
+
+    if [[ -n "$name_hint" && -n "${GITREE_WORKSPACE:-}" && -d "$GITREE_WORKSPACE/$name_hint/.bare" ]]; then
+        GITREE_PLUGIN_NAME="$name_hint"
+        GITREE_PLUGIN_DIR="$GITREE_WORKSPACE/$name_hint"
+        GITREE_BARE_DIR="$GITREE_PLUGIN_DIR/.bare"
+        return 0
+    fi
+
+    local pdir
+    if pdir=$(_find_plugin_dir 2>/dev/null); then
+        GITREE_PLUGIN_NAME="$(basename "$pdir")"
+        GITREE_PLUGIN_DIR="$pdir"
+        GITREE_BARE_DIR="$pdir/.bare"
+        return 0
+    fi
+
+    return 1
+}
+
+_branch_to_dirname() { printf '%s' "${1//\//--}"; }
+
+# Extract a usable project name from a repo URL or path
+_name_from_repo() {
+    local url="$1"
+    local name="${url##*/}"   # last path component
+    name="${name%.git}"       # strip .git
+    name="${name##*:}"        # strip scp-style host: prefix
+    printf '%s' "$name"
+}
+
+# ── Shell function management ─────────────────────────────────────────────────
+
+GITREE_SHELL_FUNC='wt() { local d; d=$(gitree wt "$@") && cd "$d"; }'
+
+_detect_shell_rc() {
+    case "${SHELL:-}" in
+        */zsh)  printf '%s' "$HOME/.zshrc";  return ;;
+        */bash) printf '%s' "$HOME/.bashrc"; return ;;
+    esac
+    [[ -f "$HOME/.zshrc" ]]  && { printf '%s' "$HOME/.zshrc";  return; }
+    [[ -f "$HOME/.bashrc" ]] && { printf '%s' "$HOME/.bashrc"; return; }
+    return 1
+}
+
+_shell_fn_installed() {
+    local rc
+    rc=$(_detect_shell_rc 2>/dev/null) || return 1
+    grep -q 'gitree wt' "$rc" 2>/dev/null
+}
+
+_try_install_shell_fn() {
+    local rc
+    rc=$(_detect_shell_rc 2>/dev/null) || return 1
+    _shell_fn_installed && return 0
+    [[ -w "$rc" ]] || return 1
+    printf '\n# gitree — worktree navigation\n%s\n' "$GITREE_SHELL_FUNC" >> "$rc"
+    printf 'Added wt() to %s — run: source %s\n' "$rc" "$rc" >&2
+}
+
+_print_shell_fn_hint() {
+    local path="${1:-}"
+    printf '\nCould not write to shell config. Add this to your shell for quick navigation:\n\n' >&2
+    printf '  %s\n' "$GITREE_SHELL_FUNC" >&2
+    if [[ -n "$path" ]]; then
+        printf '\nOtherwise, worktree is at:\n\n  cd %s\n\n' "$path" >&2
+    fi
+}
+
+_ensure_shell_fn() {
+    local path="${1:-}"
+    _shell_fn_installed && return 0
+    _try_install_shell_fn 2>&1 && return 0
+    _print_shell_fn_hint "$path"
+}
+
+# ── Bare repo setup (shared by add + convert) ─────────────────────────────────
+
+# Clone a repo as bare + set up the worktree structure.
+# $1 = repo URL/path  $2 = target dir (absolute or relative to cwd, may be ".")
+_setup_bare_repo() {
+    local repo="$1"
+    local target="$2"
+
+    local abs_target
+    if [[ "$target" == "." ]]; then
+        abs_target="$PWD"
+    else
+        abs_target="$PWD/$target"
+        mkdir -p "$abs_target"
+    fi
+
+    local bare="$abs_target/.bare"
+
+    printf 'Cloning %s...\n' "$repo"
+    git clone --bare "$repo" "$bare"
+
+    # .git pointer so container-level git commands work
+    printf 'gitdir: ./.bare\n' > "$abs_target/.git"
+
+    # Fix fetch refspec (bare clones don't set this)
+    git -C "$bare" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+    git -C "$bare" fetch --quiet
+
+    # Detect default branch
+    local default_branch
+    default_branch=$(git -C "$bare" symbolic-ref --short HEAD 2>/dev/null \
+        || git -C "$bare" for-each-ref --sort=-committerdate --format='%(refname:short)' \
+               refs/heads/ | head -1)
+    [[ -z "$default_branch" ]] && default_branch="main"
+
+    printf 'Creating main worktree on branch: %s\n' "$default_branch"
+    git -C "$bare" worktree add "../main" "$default_branch"
+
+    # Auto-lock main against accidental branch switching
+    git -C "$bare" config --add gitree.locked "main"
+    _install_lock_hook "$bare"
+
+    printf '✓ %s ready — main/ locked\n' "$(basename "$abs_target")"
+}
+
+# Repair all worktree registrations under a plugin dir (after paths change)
+_repair_worktrees() {
+    local pdir="$1"
+    if [[ -d "$pdir/main" ]]; then
+        git -C "$pdir/main" worktree repair 2>/dev/null || true
+    fi
+    if [[ -d "$pdir/.worktrees" ]]; then
+        for wt in "$pdir/.worktrees"/*/; do
+            [[ -d "$wt" ]] && git -C "$wt" worktree repair 2>/dev/null || true
+        done
+    fi
+}
+
+# ── Worktree get-or-create (shared by wt + switch) ────────────────────────────
+
+# ── Lock hook management ──────────────────────────────────────────────────────
+
+# The marker line that identifies gitree's block inside the hook file
+GITREE_HOOK_MARKER='# [gitree-lock-start]'
+
+# The hook block (appended to or replaces hooks/post-checkout in the bare repo)
+# Written as a function so it composes safely with other post-checkout logic.
+_hook_block() {
+cat << 'HOOK'
+# [gitree-lock-start] — managed by gitree, do not edit this block
+_gitree_lock_check() {
+    [[ "$3" == "1" ]] || return 0
+    local locked; locked=$(git config --get-all gitree.locked 2>/dev/null) || return 0
+    [[ -z "$locked" ]] && return 0
+    local name; name=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)") || return 0
+    printf '%s\n' "$locked" | grep -qx "$name" || return 0
+    local gdir; gdir=$(git rev-parse --git-dir 2>/dev/null) || return 0
+    # Parse "checkout: moving from <prev> to <new>" from HEAD reflog
+    local reflog_msg prev_branch new_branch
+    reflog_msg=$(git log -g --pretty='%gs' -1 HEAD 2>/dev/null)
+    prev_branch=$(printf '%s' "$reflog_msg" | sed 's/checkout: moving from \(.*\) to .*/\1/')
+    new_branch=$(printf '%s'  "$reflog_msg" | sed 's/checkout: moving from .* to \(.*\)/\1/')
+    # Restore HEAD to the previous branch
+    if [[ -n "$prev_branch" ]] && git rev-parse --verify "refs/heads/$prev_branch" >/dev/null 2>&1; then
+        printf 'ref: refs/heads/%s\n' "$prev_branch" > "$gdir/HEAD"
+    else
+        printf '%s\n' "$1" > "$gdir/HEAD"
+    fi
+    git reset --hard --quiet 2>/dev/null
+    # Delete the switched-to branch if it was freshly created (reflog has only 1 entry)
+    if [[ -n "$new_branch" && "$new_branch" != "$prev_branch" ]] && \
+       git rev-parse --verify "refs/heads/$new_branch" >/dev/null 2>&1; then
+        local ref_count
+        ref_count=$(git reflog show "refs/heads/$new_branch" 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$ref_count" -le 1 ]]; then
+            git branch -D "$new_branch" >/dev/null 2>&1 || true
+        fi
+    fi
+    printf '\n  ✗  %s is locked — branch switching is disabled here.\n' "$name" >&2
+    printf '     Use: gitree wt <branch>  to work on another branch.\n\n' >&2
+    return 1
+}
+_gitree_lock_check "$@" || exit 1
+# [gitree-lock-end]
+HOOK
+}
+
+_install_lock_hook() {
+    local bare="$1"
+    local hook="$bare/hooks/post-checkout"
+    mkdir -p "$bare/hooks"
+
+    # Already installed? (also handles old marker format)
+    if [[ -f "$hook" ]] && grep -qE '\[gitree-lock' "$hook" 2>/dev/null; then
+        # Upgrade old marker if needed
+        if ! grep -q 'gitree-lock-start' "$hook" 2>/dev/null; then
+            sed -i '' 's/# \[gitree-lock\] —/# [gitree-lock-start] —/' "$hook"
+            printf '# [gitree-lock-end]\n' >> "$hook"
+        fi
+        return 0
+    fi
+
+    if [[ ! -f "$hook" ]]; then
+        printf '#!/usr/bin/env bash\n' > "$hook"
+    else
+        printf '\n' >> "$hook"   # blank line before appended block
+    fi
+
+    _hook_block >> "$hook"
+    chmod +x "$hook"
+}
+
+_remove_lock_hook() {
+    local bare="$1"
+    local hook="$bare/hooks/post-checkout"
+    [[ -f "$hook" ]] || return 0
+
+    # Check if anything else is in the hook besides our block
+    local without_block
+    without_block=$(sed '/# \[gitree-lock-start\]/,/# \[gitree-lock-end\]/d' "$hook" \
+                    | grep -v '^[[:space:]]*$' | grep -v '^#!')
+
+    if [[ -z "$without_block" ]]; then
+        rm -f "$hook"   # our block was the only content
+    else
+        sed -i '' '/# \[gitree-lock-start\]/,/# \[gitree-lock-end\]/d' "$hook"
+    fi
+}
+
+_lock_project() {
+    local bare="$1" pname="$2" wt_name="${3:-main}"
+    local already
+    already=$(git -C "$bare" config --get-all gitree.locked 2>/dev/null \
+              | grep -x "$wt_name" || true)
+    if [[ -n "$already" ]]; then
+        printf '  %s/%s already locked\n' "$pname" "$wt_name"
+        return 0
+    fi
+    git -C "$bare" config --add gitree.locked "$wt_name"
+    _install_lock_hook "$bare"
+    printf '✓ Locked %s/%s\n' "$pname" "$wt_name"
+}
+
+cmd_lock() {
+    local name_hint="${1:-}"
+    local worktree_name="${2:-main}"
+    local workspace="${GITREE_WORKSPACE:-}"
+
+    # Lock all projects in workspace
+    if [[ "$name_hint" == "*" ]]; then
+        [[ -z "$workspace" ]] && { printf 'Error: no workspace root found\n' >&2; exit 1; }
+        for pdir in "$workspace"/*/; do
+            [[ -d "$pdir/.bare" ]] || continue
+            _lock_project "$pdir/.bare" "$(basename "$pdir")" "$worktree_name"
+        done
+        return 0
+    fi
+
+    if ! _resolve_plugin "$name_hint"; then
+        printf 'Error: not inside a project, and no project name given\n' >&2; exit 1
+    fi
+    _lock_project "$GITREE_BARE_DIR" "$GITREE_PLUGIN_NAME" "$worktree_name"
+}
+
+cmd_unlock() {
+    local name_hint="${1:-}"
+    local worktree_name="${2:-main}"
+
+    if ! _resolve_plugin "$name_hint"; then
+        printf 'Error: not inside a project, and no project name given\n' >&2; exit 1
+    fi
+
+    # --unset-all removes all occurrences; suppress error if key didn't exist
+    git -C "$GITREE_BARE_DIR" config --unset-all gitree.locked "$worktree_name" 2>/dev/null || true
+
+    # If no locked worktrees remain, remove the hook too
+    local remaining
+    remaining=$(git -C "$GITREE_BARE_DIR" config --get-all gitree.locked 2>/dev/null || true)
+    if [[ -z "$remaining" ]]; then
+        _remove_lock_hook "$GITREE_BARE_DIR"
+    fi
+
+    printf '✓ Unlocked %s/%s.\n' "$GITREE_PLUGIN_NAME" "$worktree_name"
+}
+
+# ── Worktree get-or-create (shared by wt + switch) ────────────────────────────
+
+_resolve_worktree() {
+    local bare="$1" pdir="$2" branch="$3"
+    local dirname; dirname=$(_branch_to_dirname "$branch")
+
+    local existing
+    existing=$(git -C "$bare" worktree list --porcelain | awk -v b="refs/heads/$branch" '
+        /^worktree / { wt=$2 }
+        $0 == "branch " b { print wt; exit }
+    ')
+
+    if [[ -n "$existing" ]]; then
+        printf '%s' "$existing"
+        return 0
+    fi
+
+    if git -C "$bare" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1; then
+        git -C "$bare" worktree add "../.worktrees/$dirname" "$branch" >&2
+    elif git -C "$bare" rev-parse --verify "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+        git -C "$bare" worktree add "../.worktrees/$dirname" -b "$branch" "origin/$branch" >&2
+    else
+        printf 'Error: branch %q not found in %s\n' "$branch" "$(basename "$pdir")" >&2
+        printf '\nAvailable branches:\n' >&2
+        git -C "$bare" for-each-ref --format='  %(refname:short)' refs/heads/ >&2
+        return 1
+    fi
+
+    printf '%s' "$pdir/.worktrees/$dirname"
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+cmd_init() {
+    if [[ -f "$PWD/.gitree" ]]; then
+        printf 'Already a gitree workspace root (%s/.gitree exists).\n' "$PWD"
+        _ensure_shell_fn
+        return 0
+    fi
+
+    printf '# gitree workspace\n' > "$PWD/.gitree"
+
+    # Prompt for optional SWITCH_PATH
+    local switch=""
+    read -r -p "SWITCH_PATH (symlink dir for runtime switching, or leave blank): " switch || true
+    if [[ -n "$switch" ]]; then
+        switch="${switch/#\~/$HOME}"
+        printf 'SWITCH_PATH=%s\n' "$switch" >> "$PWD/.gitree"
+    fi
+
+    printf '\nInitialized gitree workspace at %s\n' "$PWD"
+
+    # Reload config now that .gitree exists
+    GITREE_WORKSPACE="$PWD"
+    _load_config "$PWD"
+
+    _ensure_shell_fn
+}
+
+cmd_add() {
+    local repo="${1:-}"
+    local target="${2:-}"   # "", ".", or a folder name
+
+    # Prompt for repo if not given
+    if [[ -z "$repo" ]]; then
+        read -r -p "Repository URL or path: " repo || true
+        [[ -z "$repo" ]] && { printf 'No repository given.\n' >&2; exit 1; }
+    fi
+
+    local default_name; default_name=$(_name_from_repo "$repo")
+
+    # Determine target dir
+    local mono=false
+    if [[ -z "$target" ]]; then
+        local yn=""
+        read -r -p "Single-repo gitree (repo IS the workspace root)? [y/N]: " yn || true
+        case "${yn,,}" in
+            y|yes)
+                mono=true
+                target="."
+                ;;
+            *)
+                local name_input=""
+                read -r -p "Project folder name [$default_name]: " name_input || true
+                target="${name_input:-$default_name}"
+                ;;
+        esac
+    elif [[ "$target" == "." ]]; then
+        mono=true
+    fi
+
+    # Ensure we have a workspace root (.gitree) — auto-init if needed
+    if [[ -z "${GITREE_WORKSPACE:-}" ]]; then
+        if [[ "$mono" == "true" ]]; then
+            # For mono, .gitree will live alongside .bare in cwd
+            printf '# gitree workspace\n' > "$PWD/.gitree"
+            GITREE_WORKSPACE="$PWD"
+            _load_config "$PWD"
+            printf 'Initialized gitree workspace at %s\n' "$PWD"
+        else
+            # For multi, init workspace in cwd first
+            printf 'No .gitree found — initializing workspace in current directory.\n'
+            printf '# gitree workspace\n' > "$PWD/.gitree"
+            GITREE_WORKSPACE="$PWD"
+            _load_config "$PWD"
+        fi
+    fi
+
+    _setup_bare_repo "$repo" "$target"
+    _ensure_shell_fn
+}
+
+cmd_convert() {
+    local direction="${1:-}"
+
+    case "$direction" in
+        multi) _convert_to_multi ;;
+        mono)  _convert_to_mono  ;;
+        *)
+            printf 'Usage: gitree convert multi|mono\n\n' >&2
+            printf '  multi  move the single bare repo into a named subdirectory\n' >&2
+            printf '  mono   move the only project subfolder up to workspace root\n' >&2
+            exit 1
+            ;;
+    esac
+}
+
+_convert_to_multi() {
+    local workspace="${GITREE_WORKSPACE:-}"
+    [[ -z "$workspace" ]] && { printf 'Error: not inside a gitree workspace\n' >&2; exit 1; }
+
+    # Must be a mono layout: .bare/ exists at workspace root
+    if [[ ! -d "$workspace/.bare" ]]; then
+        printf 'Error: no .bare/ at workspace root — not a mono-repo layout\n' >&2
+        exit 1
+    fi
+
+    # Suggest a name from the remote URL
+    local default_name="repo"
+    local remote_url
+    remote_url=$(git -C "$workspace/.bare" remote get-url origin 2>/dev/null || true)
+    [[ -n "$remote_url" ]] && default_name=$(_name_from_repo "$remote_url")
+
+    local name=""
+    read -r -p "Project folder name [$default_name]: " name || true
+    name="${name:-$default_name}"
+
+    local dest="$workspace/$name"
+    if [[ -d "$dest" ]]; then
+        printf 'Error: %s already exists\n' "$dest" >&2; exit 1
+    fi
+
+    mkdir -p "$dest"
+
+    # Move repo components into the new subfolder
+    mv "$workspace/.bare"      "$dest/.bare"
+    mv "$workspace/.git"       "$dest/.git"
+    [[ -d "$workspace/main" ]]       && mv "$workspace/main"       "$dest/main"
+    [[ -d "$workspace/.worktrees" ]] && mv "$workspace/.worktrees" "$dest/.worktrees"
+
+    # .git still says "gitdir: ./.bare" — relative to dest/.git, still correct
+    _repair_worktrees "$dest"
+
+    printf '✓ Converted to multi-repo. Project is now at %s/\n' "$dest"
+    printf '  Run `gitree` from %s to verify.\n' "$workspace"
+}
+
+_convert_to_mono() {
+    local workspace="${GITREE_WORKSPACE:-}"
+    [[ -z "$workspace" ]] && { printf 'Error: not inside a gitree workspace\n' >&2; exit 1; }
+
+    # Must NOT already be mono
+    if [[ -d "$workspace/.bare" ]]; then
+        printf 'Error: already a mono-repo (.bare/ exists at workspace root)\n' >&2; exit 1
+    fi
+
+    # Find project subdirs (those with .bare/)
+    local plugin_dirs=()
+    for d in "$workspace"/*/; do
+        [[ -d "${d%.*/}.bare" || -d "$d.bare" ]] && plugin_dirs+=("${d%/}")
+    done
+
+    if [[ ${#plugin_dirs[@]} -eq 0 ]]; then
+        printf 'Error: no project subdirectories found\n' >&2; exit 1
+    fi
+
+    if [[ ${#plugin_dirs[@]} -ne 1 ]]; then
+        printf 'Error: convert mono requires exactly one project folder; found %d:\n' \
+            "${#plugin_dirs[@]}" >&2
+        for d in "${plugin_dirs[@]}"; do
+            printf '  %s\n' "$(basename "$d")" >&2
+        done
+        printf '\nUse `gitree convert mono` only when a single project remains.\n' >&2
+        exit 1
+    fi
+
+    local pdir="${plugin_dirs[0]}"
+    local pname; pname=$(basename "$pdir")
+    printf 'Moving %s to workspace root...\n' "$pname"
+
+    mv "$pdir/.bare"      "$workspace/.bare"
+    mv "$pdir/.git"       "$workspace/.git"
+    [[ -d "$pdir/main" ]]       && mv "$pdir/main"       "$workspace/main"
+    [[ -d "$pdir/.worktrees" ]] && mv "$pdir/.worktrees" "$workspace/.worktrees"
+
+    # Remove the now-empty project dir
+    rmdir "$pdir" 2>/dev/null || true
+
+    _repair_worktrees "$workspace"
+
+    printf '✓ Converted to mono-repo. Run `gitree` to verify.\n'
+}
+
+cmd_list() {
+    local workspace="${GITREE_WORKSPACE:-}"
+    local switch_path="${SWITCH_PATH:-}"
+
+    # Mono-repo: .bare/ is at workspace root
+    if [[ -n "$workspace" && -d "$workspace/.bare" ]]; then
+        printf '\n%s:\n' "$(basename "$workspace")"
+        git -C "$workspace/.bare" worktree list --porcelain | awk '
+            /^worktree / { wt=$2 }
+            /^branch /   { branch=substr($0,8); sub("refs/heads/","",branch) }
+            /^HEAD /     { head=substr($0,6) }
+            /^$/ {
+                if (wt != "") {
+                    if (branch != "") printf "  %-50s  (branch: %s)\n", wt, branch
+                    else              printf "  %-50s  (detached: %s)\n", wt, substr(head,1,10)
+                    wt=""; branch=""; head=""
+                }
+            }
+        '
+    elif [[ -n "$workspace" ]]; then
+        # Multi-repo workspace
+        local found=0
+        for pdir in "$workspace"/*/; do
+            [[ -d "$pdir/.bare" ]] || continue
+            found=1
+            local name; name=$(basename "$pdir")
+            printf '\n%s:\n' "$name"
+            git -C "$pdir/.bare" worktree list --porcelain | awk '
+                /^worktree / { wt=$2 }
+                /^branch /   { branch=substr($0,8); sub("refs/heads/","",branch) }
+                /^HEAD /     { head=substr($0,6) }
+                /^$/ {
+                    if (wt != "") {
+                        if (branch != "") printf "  %-50s  (branch: %s)\n", wt, branch
+                        else              printf "  %-50s  (detached: %s)\n", wt, substr(head,1,10)
+                        wt=""; branch=""; head=""
+                    }
+                }
+            '
+        done
+        [[ $found -eq 0 ]] && printf '  (no projects found — use `gitree add` to add one)\n'
+    else
+        local pdir
+        if pdir=$(_find_plugin_dir 2>/dev/null); then
+            printf '\n%s:\n' "$(basename "$pdir")"
+            git -C "$pdir/.bare" worktree list
+        else
+            printf 'Not inside a gitree workspace. Run `gitree init` to create one.\n' >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -n "$switch_path" ]]; then
+        printf '\nRuntime load state (%s):\n' "$switch_path"
+        local printed=0
+        for sym in "$switch_path"/*/; do
+            sym="${sym%/}"
+            [[ -L "$sym" ]] || continue
+            local target; target=$(readlink "$sym")
+            local name; name=$(basename "$sym")
+            [[ -n "$workspace" && "$target" == "$workspace"/* ]] || continue
+            local rel="${target##*"$name"/}"
+            printf '  %-40s → %s\n' "$name" "$rel"
+            printed=1
+        done
+        [[ $printed -eq 0 ]] && printf '  (none)\n'
+    fi
+}
+
+cmd_audit() {
+    local name_hint="${1:-}"
+    local workspace="${GITREE_WORKSPACE:-}"
+
+    if [[ -z "$workspace" ]]; then
+        printf 'Error: no .gitree config found — cannot determine workspace root\n' >&2; exit 1
+    fi
+
+    _audit_plugin() {
+        local pdir="$1"
+        local name; name=$(basename "$pdir")
+        local bare="$pdir/.bare"
+
+        while IFS= read -r ref; do
+            local branch="${ref#refs/heads/}"
+            local has_wt
+            has_wt=$(git -C "$bare" worktree list --porcelain | awk -v b="refs/heads/$branch" '
+                $0=="branch "b { found=1 } END { print found+0 }
+            ')
+            if [[ "$has_wt" == "0" ]]; then
+                printf '  %-35s  %s\n' "$name" "$branch"
+            fi
+        done < <(git -C "$bare" for-each-ref --format='%(refname)' refs/heads/)
+    }
+
+    printf 'Branches with no worktree:\n'
+
+    # Mono-repo
+    if [[ -d "$workspace/.bare" ]]; then
+        _audit_plugin "$workspace"
+        return
+    fi
+
+    if [[ -n "$name_hint" ]]; then
+        local pdir="$workspace/$name_hint"
+        [[ -d "$pdir/.bare" ]] || { printf 'Error: %s not found in workspace\n' "$name_hint" >&2; exit 1; }
+        _audit_plugin "$pdir"
+    else
+        local found=0
+        for pdir in "$workspace"/*/; do
+            [[ -d "$pdir/.bare" ]] || continue
+            found=1
+            _audit_plugin "$pdir"
+        done
+        [[ $found -eq 0 ]] && printf '  (no projects found)\n'
+    fi
+}
+
+cmd_wt() {
+    local branch="" name_hint=""
+    case $# in
+        0) printf 'Usage: gitree wt [<project>] <branch>\n' >&2; exit 1 ;;
+        1) branch="$1" ;;
+        *) name_hint="$1"; branch="$2" ;;
+    esac
+
+    if ! _resolve_plugin "$name_hint"; then
+        printf 'Error: not inside a project directory, and no project name given\n' >&2; exit 1
+    fi
+
+    local path
+    path=$(_resolve_worktree "$GITREE_BARE_DIR" "$GITREE_PLUGIN_DIR" "$branch")
+
+    _ensure_shell_fn "$path"
+    printf '%s\n' "$path"
+}
+
+cmd_switch() {
+    local switch_path="${SWITCH_PATH:-}"
+    if [[ -z "$switch_path" ]]; then
+        printf 'Error: SWITCH_PATH not set — add it to your .gitree config\n' >&2; exit 1
+    fi
+
+    local branch="" name_hint=""
+    case $# in
+        0) : ;;
+        1) branch="$1" ;;
+        *) name_hint="$1"; branch="$2" ;;
+    esac
+
+    if ! _resolve_plugin "$name_hint"; then
+        printf 'Error: not inside a project directory, and no project name given\n' >&2; exit 1
+    fi
+
+    local pdir="$GITREE_PLUGIN_DIR"
+    local bare="$GITREE_BARE_DIR"
+    local name="$GITREE_PLUGIN_NAME"
+    local sym="$switch_path/$name"
+
+    if [[ -z "$branch" ]]; then
+        [[ -d "$pdir/main" ]] || { printf 'Error: main/ worktree not found for %s\n' "$name" >&2; exit 1; }
+        ln -sfn "$pdir/main" "$sym"
+        local actual; actual=$(git -C "$pdir/main" branch --show-current)
+        printf '✓ %s → main/ (branch: %s)\n' "$name" "$actual"
+        return
+    fi
+
+    local target
+    target=$(_resolve_worktree "$bare" "$pdir" "$branch")
+
+    ln -sfn "$target" "$sym"
+    printf '✓ %s → %s (branch: %s)\n' "$name" "$target" "$branch"
+}
+
+cmd_install() {
+    local install_dir="${1:-/usr/local/bin}"
+    local self; self=$(realpath "$0")
+    local dest="$install_dir/gitree"
+
+    if [[ "$self" == "$dest" ]]; then
+        printf 'gitree is already installed at %s\n' "$dest"
+    elif cp "$self" "$dest" && chmod +x "$dest" 2>/dev/null; then
+        printf '✓ Installed gitree to %s\n' "$dest"
+    elif sudo cp "$self" "$dest" && sudo chmod +x "$dest"; then
+        printf '✓ Installed gitree to %s (via sudo)\n' "$dest"
+    else
+        printf 'Could not install to %s\nTry: sudo cp %s /usr/local/bin/gitree\n' \
+            "$install_dir" "$self" >&2
+    fi
+
+    if _shell_fn_installed; then
+        printf 'Shell function wt() already installed.\n'
+    elif _try_install_shell_fn; then
+        :
+    else
+        printf '\nCould not write to shell config. Add this manually:\n\n  %s\n\n' \
+            "$GITREE_SHELL_FUNC" >&2
+    fi
+}
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+GITREE_WORKSPACE=""
+SWITCH_PATH=""
+
+if _ws=$(_find_workspace_root 2>/dev/null); then
+    GITREE_WORKSPACE="$_ws"
+    _load_config "$_ws"
+fi
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+_help() {
+    # Colour only when stdout is a real terminal
+    local b="" d="" g="" y="" c="" r=""
+    if [[ -t 1 ]]; then
+        b=$'\033[1m'       # bold
+        d=$'\033[2m'       # dim
+        g=$'\033[32m'      # green
+        y=$'\033[33m'      # yellow
+        c=$'\033[36m'      # cyan
+        r=$'\033[0m'       # reset
+    fi
+
+    # header
+    printf '\n  %s%s%s  bare-repo worktree manager\n\n' "$b" "gitree" "$r"
+
+    # usage
+    printf '%sUsage%s\n' "$b" "$r"
+    printf '  gitree %s<command>%s [args]\n\n' "$c" "$r"
+
+    # grouped commands
+    printf '%sSetup%s\n' "$b" "$r"
+    printf '  %sinit%s                            init current directory as a workspace root\n' "$g" "$r"
+    printf '  %sadd%s [<repo>] [<name>|.]         add a repo %s(interactive if no args)%s\n' \
+           "$g" "$r" "$d" "$r"
+    printf '  %sconvert%s multi|mono              convert between single- and multi-repo layouts\n\n' \
+           "$g" "$r"
+
+    printf '%sWorktrees%s\n' "$b" "$r"
+    printf '  %swt%s [<project>] <branch>         get or create a worktree; print its path\n' "$g" "$r"
+    printf '  %saudit%s [<project>]               show branches that have no worktree\n\n' "$g" "$r"
+
+    printf '%sRuntime%s\n' "$b" "$r"
+    printf '  %sswitch%s [<project>] [<branch>]   point SWITCH_PATH symlink at a worktree\n' "$g" "$r"
+    printf '  %slist%s                            show all worktrees and load state  %s(default)%s\n\n' \
+           "$g" "$r" "$d" "$r"
+
+    printf '%sSafety%s\n' "$b" "$r"
+    printf '  %slock%s [<project>] [<worktree>]   lock a worktree against branch switching %s(default: main)%s\n' \
+           "$g" "$r" "$d" "$r"
+    printf '  %sunlock%s [<project>] [<worktree>] remove the lock\n\n' "$g" "$r"
+
+    printf '%sTools%s\n' "$b" "$r"
+    printf '  %sinstall%s [<dir>]                 install gitree globally + wt() shell function\n\n' \
+           "$g" "$r"
+
+    # config
+    printf '%sConfig%s  %s.gitree at workspace root%s\n' "$b" "$r" "$d" "$r"
+    printf '  %sSWITCH_PATH%s=<path>              directory where %sswitch%s manages symlinks\n\n' \
+           "$y" "$r" "$g" "$r"
+
+    # shell function
+    printf '%sShell function%s  %sadded by install / init%s\n' "$b" "$r" "$d" "$r"
+    printf '  %swt() { local d; d=$(gitree wt "$@") && cd "$d"; }%s\n' "$d" "$r"
+    printf '  Then: %swt <branch>%s  creates the worktree and cds into it\n\n' "$c" "$r"
+
+    # examples
+    printf '%sExamples%s\n' "$b" "$r"
+    printf '  gitree init\n'
+    printf '  gitree add https://github.com/org/repo\n'
+    printf '  gitree add https://github.com/org/repo %s.%s               %s# single-repo workspace%s\n' \
+           "$c" "$r" "$d" "$r"
+    printf '  gitree wt feature/my-branch               %s# print worktree path%s\n' "$d" "$r"
+    printf '  %swt%s feature/my-branch                     %s# cd into it (shell fn)%s\n' \
+           "$c" "$r" "$d" "$r"
+    printf '  gitree switch feature/my-branch\n'
+    printf '  gitree audit\n'
+    printf '\n'
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+main() {
+    local sub="${1:-list}"
+    case "$sub" in
+        list)    cmd_list ;;
+        init)    cmd_init ;;
+        add)     shift; cmd_add "$@" ;;
+        convert) shift; cmd_convert "$@" ;;
+        audit)   shift; cmd_audit "$@" ;;
+        lock)    shift; cmd_lock "$@" ;;
+        unlock)  shift; cmd_unlock "$@" ;;
+        wt)      shift; cmd_wt "$@" ;;
+        switch)  shift; cmd_switch "$@" ;;
+        install) shift; cmd_install "$@" ;;
+        -h|--help|help) _help ;;
+        *)
+            printf 'Unknown subcommand: %s\n\n' "$sub" >&2
+            _help >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
