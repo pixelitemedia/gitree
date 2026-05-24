@@ -334,6 +334,34 @@ _unlock_project() {
     printf '✓ Unlocked %s/%s\n' "$pname" "$wt_name"
 }
 
+# ── Manifest helpers ─────────────────────────────────────────────────────────
+
+_config_set_project() {
+    local name="$1" url="$2"
+    [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]] || return 0
+    python3 - "$GITREE_CONFIG_FILE" "$name" "$url" <<'PY'
+import json, sys
+path, name, url = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f: d = json.load(f)
+d.setdefault("projects", {})[name] = url
+with open(path, "w") as f: json.dump(d, f, indent=2)
+f.write("\n")
+PY
+}
+
+_config_remove_project() {
+    local name="$1"
+    [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]] || return 0
+    python3 - "$GITREE_CONFIG_FILE" "$name" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+with open(path) as f: d = json.load(f)
+d.get("projects", {}).pop(name, None)
+with open(path, "w") as f: json.dump(d, f, indent=2)
+f.write("\n")
+PY
+}
+
 # ── Bare repo setup ───────────────────────────────────────────────────────────
 
 _setup_bare_repo() {
@@ -373,7 +401,13 @@ _setup_bare_repo() {
     git -C "$bare" config --add gitree.locked "main"
     _install_lock_hook "$bare"
 
-    printf '✓ %s ready — main/ locked\n' "$(basename "$abs_target")"
+    local project_name; project_name=$(basename "$abs_target")
+    printf '✓ %s ready — main/ locked\n' "$project_name"
+
+    # Record in workspace manifest (skipped for mono-repo where project IS workspace)
+    if [[ "$target" != "." ]]; then
+        _config_set_project "$project_name" "$repo"
+    fi
 }
 
 _repair_worktrees() {
@@ -817,6 +851,30 @@ cmd_remove() {
     printf '✓ Removed worktree: %s\n' "$branch"
 }
 
+cmd_drop() {
+    local name_hint="${1:-}"
+    local workspace="${GITREE_WORKSPACE:-}"
+    [[ -z "$workspace" ]] && { printf 'Error: no .gitree config found\n' >&2; exit 1; }
+
+    if ! _resolve_plugin "$name_hint"; then
+        printf 'Error: not inside a project directory, and no project name given\n' >&2; exit 1
+    fi
+
+    local name="$GITREE_PLUGIN_NAME"
+    local pdir="$GITREE_PLUGIN_DIR"
+
+    printf 'This will permanently delete %s and all its worktrees.\n' "$name"
+    local yn=""
+    read -r -p "Continue? [y/N]: " yn || true
+    [[ "${yn,,}" == "y" || "${yn,,}" == "yes" ]] || { printf 'Aborted.\n'; return 0; }
+
+    # Prune git's worktree registrations first so git doesn't complain
+    git -C "$pdir/.bare" worktree prune 2>/dev/null || true
+    rm -rf "$pdir"
+    _config_remove_project "$name"
+    printf '✓ Dropped %s\n' "$name"
+}
+
 cmd_switch() {
     # Parse -l <location> flag before positional args
     local location="default"
@@ -866,6 +924,43 @@ cmd_switch() {
     target=$(_resolve_worktree "$bare" "$pdir" "$branch")
     ln -sfn "$target" "$sym"
     printf '✓ [%s] %s → %s (branch: %s)\n' "$location" "$name" "$target" "$branch"
+}
+
+cmd_restore() {
+    local workspace="${GITREE_WORKSPACE:-}"
+    [[ -z "$workspace" ]] && { printf 'Error: no .gitree config found\n' >&2; exit 1; }
+    [[ "${GITREE_CONFIG_JSON:-0}" != "1" ]] && {
+        printf 'Error: .gitree is not JSON format — no project manifest to restore from\n' >&2; exit 1
+    }
+
+    local projects_json
+    projects_json=$(python3 - "$GITREE_CONFIG_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+projects = d.get("projects", {})
+for name, url in projects.items():
+    print(f"{name}\t{url}")
+PY
+    )
+
+    if [[ -z "$projects_json" ]]; then
+        printf 'No projects listed in .gitree\n'
+        return 0
+    fi
+
+    local restored=0 skipped=0
+    while IFS=$'\t' read -r name url; do
+        if [[ -d "$workspace/$name/.bare" ]]; then
+            printf '  %-40s  already present\n' "$name"
+            (( skipped++ )) || true
+        else
+            printf '  %-40s  cloning...\n' "$name"
+            _setup_bare_repo "$url" "$name"
+            (( restored++ )) || true
+        fi
+    done <<< "$projects_json"
+
+    printf '\nDone: %d restored, %d already present\n' "$restored" "$skipped"
 }
 
 cmd_repair_head() {
@@ -1133,6 +1228,8 @@ _help() {
     printf '%sSetup%s\n' "$b" "$r"
     printf '  %sinit%s                              init current directory as a workspace root\n' "$g" "$r"
     printf '  %sadd%s [<repo>] [<name>|.]           add a repo %s(interactive if no args)%s\n' "$g" "$r" "$d" "$r"
+    printf '  %srestore%s                           clone all projects listed in .gitree\n' "$g" "$r"
+    printf '  %sdrop%s [<project>]                  remove a project from disk and manifest\n' "$g" "$r"
     printf '  %sconvert%s multi|mono                convert between single- and multi-repo layouts\n\n' "$g" "$r"
 
     printf '%sWorktrees%s\n' "$b" "$r"
@@ -1197,6 +1294,8 @@ main() {
         lock)       shift; cmd_lock "$@" ;;
         unlock)     shift; cmd_unlock "$@" ;;
         install)      shift; cmd_install "$@" ;;
+        restore)      cmd_restore ;;
+        drop)         shift; cmd_drop "$@" ;;
         repair-head)  cmd_repair_head ;;
         completion) shift; cmd_completion "$@" ;;
         -v|--version|version) printf 'gitree %s\n' "$GITREE_VERSION" ;;
