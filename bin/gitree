@@ -15,15 +15,15 @@
 #   gitree goto [<project>] <branch>        cd into a worktree (via shell function)
 #   gitree wt [<project>] <branch>          get or create a worktree; print its path
 #   gitree remove [<project>] <branch>      remove a worktree safely
-#   gitree switch [<project>] [<branch>]    point SWITCH_PATH symlink at a worktree
+#   gitree switch [-l <loc>] [<project>] [<branch>]  point switch symlink at a worktree
 #   gitree pull [<project>|*]               fetch + fast-forward main worktree
 #   gitree lock [<project>|*] [<worktree>]  lock a worktree against branch switching
 #   gitree unlock [<project>|*] [<worktree>] remove the lock
 #   gitree install [--shell-only] [<dir>]   install gitree globally and the wt() shell fn
 #   gitree completion <bash|zsh>            print shell completion script
 #
-# .gitree config keys (at workspace root):
-#   SWITCH_PATH=/path/to/symlink/dir        managed by `gitree switch` (optional)
+# .gitree config (JSON, at workspace root):
+#   { "switch": { "default": "/path/", "wpml": "/other/" } }
 #
 # Shell function — add to your rc for one-word worktree navigation:
 #   wt() { local d; d=$(gitree wt "$@") && cd "$d"; }
@@ -68,12 +68,74 @@ _find_plugin_dir() {
 _load_config() {
     local file="$1/.gitree"
     [[ -f "$file" ]] || return 0
-    while IFS='=' read -r key val; do
-        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-        key="${key// /}"
-        val="${val/#\~/$HOME}"
-        export "$key"="$val"
-    done < "$file"
+
+    # Detect JSON vs legacy key=value
+    if python3 -c "import json; json.load(open('$file'))" 2>/dev/null; then
+        GITREE_CONFIG_FILE="$file"
+        GITREE_CONFIG_JSON=1
+        # Populate SWITCH_PATH from switch.default for backward compat
+        SWITCH_PATH=$(python3 - "$file" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sw = d.get("switch", {})
+if isinstance(sw, dict):   print(sw.get("default", ""))
+elif isinstance(sw, str):  print(sw)
+PY
+        )
+        SWITCH_PATH="${SWITCH_PATH/#\~/$HOME}"
+    else
+        GITREE_CONFIG_FILE="$file"
+        GITREE_CONFIG_JSON=0
+        while IFS='=' read -r key val; do
+            [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+            key="${key// /}"
+            val="${val/#\~/$HOME}"
+            export "$key"="$val"
+        done < "$file"
+    fi
+}
+
+# Return the switch path for a named location ("default" if omitted).
+# Works with both JSON and legacy formats.
+_get_switch_path() {
+    local location="${1:-default}"
+    if [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]]; then
+        local p
+        p=$(python3 - "$GITREE_CONFIG_FILE" "$location" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+loc = sys.argv[2]
+sw = d.get("switch", {})
+if isinstance(sw, dict):  print(sw.get(loc, ""))
+elif isinstance(sw, str) and loc == "default": print(sw)
+PY
+        )
+        p="${p/#\~/$HOME}"
+        printf '%s' "$p"
+    else
+        # Legacy: only "default" is valid
+        if [[ "$location" == "default" ]]; then
+            printf '%s' "${SWITCH_PATH:-}"
+        fi
+    fi
+}
+
+# List all named switch locations as "name<TAB>path" lines.
+_list_switch_locations() {
+    if [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]]; then
+        python3 - "$GITREE_CONFIG_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sw = d.get("switch", {})
+if isinstance(sw, dict):
+    for k, v in sw.items():
+        print(f"{k}\t{v}")
+elif isinstance(sw, str):
+    print(f"default\t{sw}")
+PY
+    elif [[ -n "${SWITCH_PATH:-}" ]]; then
+        printf 'default\t%s\n' "$SWITCH_PATH"
+    fi
 }
 
 # Resolve plugin name + dirs from an optional name hint, falling back to cwd.
@@ -400,13 +462,13 @@ cmd_init() {
         return 0
     fi
 
-    printf '# gitree workspace\n' > "$PWD/.gitree"
-
     local switch=""
-    read -r -p "SWITCH_PATH (symlink dir for runtime switching, or leave blank): " switch || true
+    read -r -p "Switch path for runtime symlinks (or leave blank): " switch || true
+    switch="${switch/#\~/$HOME}"
     if [[ -n "$switch" ]]; then
-        switch="${switch/#\~/$HOME}"
-        printf 'SWITCH_PATH=%s\n' "$switch" >> "$PWD/.gitree"
+        printf '{\n  "switch": {\n    "default": "%s"\n  }\n}\n' "$switch" > "$PWD/.gitree"
+    else
+        printf '{}\n' > "$PWD/.gitree"
     fi
 
     printf '\nInitialized gitree workspace at %s\n' "$PWD"
@@ -612,18 +674,33 @@ cmd_list() {
         fi
     fi
 
-    if [[ -n "$switch_path" ]]; then
+    # Runtime load state — one block per switch location
+    local any_locations=0
+    while IFS=$'\t' read -r loc_name loc_path; do
+        [[ -z "$loc_path" ]] && continue
+        loc_path="${loc_path/#\~/$HOME}"
+        [[ -d "$loc_path" ]] || continue
+        any_locations=1
+
         if [[ -n "$single_project" ]]; then
-            local sym="$switch_path/$single_project"
+            local sym="$loc_path/$single_project"
             if [[ -L "$sym" ]]; then
                 local target; target=$(readlink "$sym")
                 local rel="${target##*"$single_project"/}"
-                printf '\nRuntime → %s\n' "$rel"
+                if [[ "$loc_name" == "default" ]]; then
+                    printf '\nRuntime → %s\n' "$rel"
+                else
+                    printf '\nRuntime [%s] → %s\n' "$loc_name" "$rel"
+                fi
             fi
         else
-            printf '\nRuntime load state (%s):\n' "$switch_path"
+            if [[ "$loc_name" == "default" ]]; then
+                printf '\nRuntime load state (%s):\n' "$loc_path"
+            else
+                printf '\nRuntime [%s] (%s):\n' "$loc_name" "$loc_path"
+            fi
             local printed=0
-            for sym in "$switch_path"/*/; do
+            for sym in "$loc_path"/*/; do
                 sym="${sym%/}"
                 [[ -L "$sym" ]] || continue
                 local target; target=$(readlink "$sym")
@@ -635,7 +712,7 @@ cmd_list() {
             done
             [[ $printed -eq 0 ]] && printf '  (none)\n'
         fi
-    fi
+    done < <(_list_switch_locations)
 }
 
 cmd_audit() {
@@ -741,8 +818,25 @@ cmd_remove() {
 }
 
 cmd_switch() {
-    local switch_path="${SWITCH_PATH:-}"
-    [[ -z "$switch_path" ]] && { printf 'Error: SWITCH_PATH not set in .gitree\n' >&2; exit 1; }
+    # Parse -l <location> flag before positional args
+    local location="default"
+    while [[ $# -gt 0 && "$1" == -* ]]; do
+        case "$1" in
+            -l|--location) location="${2:?"-l requires a location name"}"; shift 2 ;;
+            *) printf 'Unknown flag: %s\n' "$1" >&2; exit 1 ;;
+        esac
+    done
+
+    local switch_path
+    switch_path=$(_get_switch_path "$location")
+    if [[ -z "$switch_path" ]]; then
+        if [[ "$location" == "default" ]]; then
+            printf 'Error: no switch location configured in .gitree\n' >&2
+        else
+            printf 'Error: switch location "%s" not found in .gitree\n' "$location" >&2
+        fi
+        exit 1
+    fi
 
     local branch="" name_hint=""
     case $# in
@@ -764,14 +858,14 @@ cmd_switch() {
         [[ -d "$pdir/main" ]] || { printf 'Error: main/ not found for %s\n' "$name" >&2; exit 1; }
         ln -sfn "$pdir/main" "$sym"
         local actual; actual=$(git -C "$pdir/main" branch --show-current)
-        printf '✓ %s → main/ (branch: %s)\n' "$name" "$actual"
+        printf '✓ [%s] %s → main/ (branch: %s)\n' "$location" "$name" "$actual"
         return
     fi
 
     local target
     target=$(_resolve_worktree "$bare" "$pdir" "$branch")
     ln -sfn "$target" "$sym"
-    printf '✓ %s → %s (branch: %s)\n' "$name" "$target" "$branch"
+    printf '✓ [%s] %s → %s (branch: %s)\n' "$location" "$name" "$target" "$branch"
 }
 
 cmd_repair_head() {
@@ -1013,6 +1107,8 @@ ZSH
 
 GITREE_WORKSPACE=""
 SWITCH_PATH=""
+GITREE_CONFIG_FILE=""
+GITREE_CONFIG_JSON=0
 
 if _ws=$(_find_workspace_root 2>/dev/null); then
     GITREE_WORKSPACE="$_ws"
@@ -1047,7 +1143,7 @@ _help() {
     printf '  %saudit%s [<project>]                 show branches that have no worktree\n\n' "$g" "$r"
 
     printf '%sRuntime%s\n' "$b" "$r"
-    printf '  %sswitch%s [<project>] [%s<branch>%s]     point SWITCH_PATH symlink at a worktree\n' "$g" "$r" "$c" "$r"
+    printf '  %sswitch%s [-l loc] [<project>] [%s<branch>%s]  point switch symlink at a worktree\n' "$g" "$r" "$c" "$r"
     printf '  %spull%s [<project>|*]                fetch + fast-forward main worktree\n' "$g" "$r"
     printf '  %slist%s                              show all worktrees and load state  %s(default)%s\n\n' \
         "$g" "$r" "$d" "$r"
@@ -1062,9 +1158,8 @@ _help() {
     printf '  %scompletion%s <bash|zsh>             print shell completion script\n' "$g" "$r"
     printf '  %srepair-head%s                       reset bare HEAD to remote default branch\n\n' "$g" "$r"
 
-    printf '%sConfig%s  %s.gitree at workspace root%s\n' "$b" "$r" "$d" "$r"
-    printf '  %sSWITCH_PATH%s=<path>               directory where %sswitch%s manages symlinks\n\n' \
-        "$y" "$r" "$g" "$r"
+    printf '%sConfig%s  %s.gitree (JSON) at workspace root%s\n' "$b" "$r" "$d" "$r"
+    printf '  %s{ "switch": { "default": "/path/", "wpml": "/path2/" } }%s\n\n' "$d" "$r"
 
     printf '%sShell functions%s  %sadded by install / init%s\n' "$b" "$r" "$d" "$r"
     printf '  %swt()          { local d; d=$(gitree wt   "$@") && cd "$d"; }%s\n' "$d" "$r"
