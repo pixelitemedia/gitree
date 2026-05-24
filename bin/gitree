@@ -112,8 +112,8 @@ _name_from_repo() {
 # ── Shell function management ─────────────────────────────────────────────────
 
 GITREE_SHELL_FUNCS='# gitree — worktree navigation
-wt()   { local d; d=$(gitree wt   "$@") && cd "$d"; }
-goto() { local d; d=$(gitree goto "$@") && cd "$d"; }'
+wt()          { local d; d=$(gitree wt   "$@") && cd "$d"; }
+gitree-goto() { local d; d=$(gitree goto "$@") && cd "$d"; }'
 
 _detect_shell_rc() {
     case "${SHELL:-}" in
@@ -134,7 +134,7 @@ _shell_fn_installed() {
 _goto_fn_installed() {
     local rc
     rc=$(_detect_shell_rc 2>/dev/null) || return 1
-    grep -q 'gitree goto' "$rc" 2>/dev/null
+    grep -q 'gitree-goto' "$rc" 2>/dev/null
 }
 
 _try_install_shell_fn() {
@@ -142,15 +142,15 @@ _try_install_shell_fn() {
     rc=$(_detect_shell_rc 2>/dev/null) || return 1
     [[ -w "$rc" ]] || return 1
     if _shell_fn_installed; then
-        # Already has wt() — patch in goto() if missing
+        # Already has wt() — patch in gitree-goto() if missing
         if ! _goto_fn_installed; then
-            printf "goto() { local d; d=\$(gitree goto \"\$@\") && cd \"\$d\"; }\n" >> "$rc"
-            printf 'Added goto() to %s — run: source %s\n' "$rc" "$rc" >&2
+            printf "gitree-goto() { local d; d=\$(gitree goto \"\$@\") && cd \"\$d\"; }\n" >> "$rc"
+            printf 'Added gitree-goto() to %s — run: source %s\n' "$rc" "$rc" >&2
         fi
         return 0
     fi
     printf '\n%s\n' "$GITREE_SHELL_FUNCS" >> "$rc"
-    printf 'Added wt() and goto() to %s — run: source %s\n' "$rc" "$rc" >&2
+    printf 'Added wt() and gitree-goto() to %s — run: source %s\n' "$rc" "$rc" >&2
 }
 
 _print_shell_fn_hint() {
@@ -872,7 +872,7 @@ cmd_install() {
     fi
 
     if _shell_fn_installed && _goto_fn_installed; then
-        printf 'Shell functions wt() and goto() already installed.\n'
+        printf 'Shell functions wt() and gitree-goto() already installed.\n'
     elif _try_install_shell_fn; then
         :
     else
@@ -993,7 +993,7 @@ _help() {
 
     printf '%sWorktrees%s\n' "$b" "$r"
     printf '  %snew%s [<project>] %s<branch>%s          create a branch and its worktree\n' "$g" "$r" "$c" "$r"
-    printf '  %sgoto%s [<project>] %s<branch>%s         cd into a worktree (via shell fn)\n' "$g" "$r" "$c" "$r"
+    printf '  %sgoto%s [<project>] %s<branch>%s         cd into a worktree (via gitree-goto shell fn)\n' "$g" "$r" "$c" "$r"
     printf '  %swt%s [<project>] %s<branch>%s           get or create a worktree; print its path\n' "$g" "$r" "$c" "$r"
     printf '  %sremove%s [<project>] %s<branch>%s       remove a worktree safely\n' "$g" "$r" "$c" "$r"
     printf '  %saudit%s [<project>]                 show branches that have no worktree\n\n' "$g" "$r"
@@ -1018,15 +1018,15 @@ _help() {
         "$y" "$r" "$g" "$r"
 
     printf '%sShell functions%s  %sadded by install / init%s\n' "$b" "$r" "$d" "$r"
-    printf '  %swt()   { local d; d=$(gitree wt   "$@") && cd "$d"; }%s\n' "$d" "$r"
-    printf '  %sgoto() { local d; d=$(gitree goto "$@") && cd "$d"; }%s\n' "$d" "$r"
-    printf '  Then: %swt <branch>%s or %sgoto <branch>%s  cds into the worktree\n\n' "$c" "$r" "$c" "$r"
+    printf '  %swt()          { local d; d=$(gitree wt   "$@") && cd "$d"; }%s\n' "$d" "$r"
+    printf '  %sgitree-goto() { local d; d=$(gitree goto "$@") && cd "$d"; }%s\n' "$d" "$r"
+    printf '  Then: %swt <branch>%s or %sgitree-goto <branch>%s  cds into the worktree\n\n' "$c" "$r" "$c" "$r"
 
     printf '%sExamples%s\n' "$b" "$r"
     printf '  gitree init\n'
     printf '  gitree add https://github.com/org/repo\n'
     printf '  gitree new feature/my-thing             %s# branch + worktree in one step%s\n' "$d" "$r"
-    printf '  %sgoto%s feature/my-thing                 %s# cd into it (shell fn)%s\n' "$c" "$r" "$d" "$r"
+    printf '  %sgitree-goto%s feature/my-thing           %s# cd into it (shell fn)%s\n' "$c" "$r" "$d" "$r"
     printf '  %swt%s feature/my-thing                   %s# same; also prints path%s\n' "$c" "$r" "$d" "$r"
     printf '  gitree pull %s*%s                          %s# update all projects%s\n' "$c" "$r" "$d" "$r"
     printf '  gitree lock %s*%s                          %s# lock main in all projects%s\n' "$c" "$r" "$d" "$r"
