@@ -529,26 +529,53 @@ _convert_to_mono() {
 }
 
 cmd_list() {
+    local name_hint="${1:-}"
     local workspace="${GITREE_WORKSPACE:-}"
     local switch_path="${SWITCH_PATH:-}"
+    local single_project=""  # set to project name when showing just one
+
+    _print_project() {
+        local pdir="$1"
+        printf '\n%s:\n' "$(basename "$pdir")"
+        _list_project_worktrees "$pdir/.bare"
+    }
 
     if [[ -n "$workspace" && -d "$workspace/.bare" ]]; then
-        printf '\n%s:\n' "$(basename "$workspace")"
-        _list_project_worktrees "$workspace/.bare"
+        # mono-repo workspace
+        _print_project "$workspace"
+        single_project=$(basename "$workspace")
     elif [[ -n "$workspace" ]]; then
-        local found=0
-        for pdir in "$workspace"/*/; do
-            [[ -d "$pdir/.bare" ]] || continue
-            found=1
-            printf '\n%s:\n' "$(basename "$pdir")"
-            _list_project_worktrees "$pdir/.bare"
-        done
-        [[ $found -eq 0 ]] && printf '  (no projects — use `gitree add` to add one)\n'
+        # multi-project workspace
+        local pdir_hint=""
+        # if a name was given, look for that project
+        if [[ -n "$name_hint" ]]; then
+            if [[ -d "$workspace/$name_hint/.bare" ]]; then
+                pdir_hint="$workspace/$name_hint"
+            else
+                printf 'Error: project "%s" not found in workspace\n' "$name_hint" >&2; exit 1
+            fi
+        # if inside a plugin subdir, auto-detect which project
+        elif pdir_hint=$(_find_plugin_dir 2>/dev/null); then
+            : # use auto-detected pdir_hint
+        fi
+
+        if [[ -n "$pdir_hint" ]]; then
+            _print_project "$pdir_hint"
+            single_project=$(basename "$pdir_hint")
+        else
+            local found=0
+            for pdir in "$workspace"/*/; do
+                [[ -d "$pdir/.bare" ]] || continue
+                found=1
+                _print_project "$pdir"
+            done
+            [[ $found -eq 0 ]] && printf '  (no projects — use `gitree add` to add one)\n'
+        fi
     else
         local pdir
         if pdir=$(_find_plugin_dir 2>/dev/null); then
-            printf '\n%s:\n' "$(basename "$pdir")"
-            _list_project_worktrees "$pdir/.bare"
+            _print_project "$pdir"
+            single_project=$(basename "$pdir")
         else
             printf 'Not inside a gitree workspace. Run `gitree init` to create one.\n' >&2
             exit 1
@@ -556,19 +583,28 @@ cmd_list() {
     fi
 
     if [[ -n "$switch_path" ]]; then
-        printf '\nRuntime load state (%s):\n' "$switch_path"
-        local printed=0
-        for sym in "$switch_path"/*/; do
-            sym="${sym%/}"
-            [[ -L "$sym" ]] || continue
-            local target; target=$(readlink "$sym")
-            local name; name=$(basename "$sym")
-            [[ -n "$workspace" && "$target" == "$workspace"/* ]] || continue
-            local rel="${target##*"$name"/}"
-            printf '  %-40s → %s\n' "$name" "$rel"
-            printed=1
-        done
-        [[ $printed -eq 0 ]] && printf '  (none)\n'
+        if [[ -n "$single_project" ]]; then
+            local sym="$switch_path/$single_project"
+            if [[ -L "$sym" ]]; then
+                local target; target=$(readlink "$sym")
+                local rel="${target##*"$single_project"/}"
+                printf '\nRuntime → %s\n' "$rel"
+            fi
+        else
+            printf '\nRuntime load state (%s):\n' "$switch_path"
+            local printed=0
+            for sym in "$switch_path"/*/; do
+                sym="${sym%/}"
+                [[ -L "$sym" ]] || continue
+                local target; target=$(readlink "$sym")
+                local name; name=$(basename "$sym")
+                [[ -n "$workspace" && "$target" == "$workspace"/* ]] || continue
+                local rel="${target##*"$name"/}"
+                printf '  %-40s → %s\n' "$name" "$rel"
+                printed=1
+            done
+            [[ $printed -eq 0 ]] && printf '  (none)\n'
+        fi
     fi
 }
 
@@ -977,7 +1013,7 @@ _help() {
 main() {
     local sub="${1:-list}"
     case "$sub" in
-        list)       cmd_list ;;
+        list)       shift; cmd_list "$@" ;;
         init)       cmd_init ;;
         add)        shift; cmd_add "$@" ;;
         new)        shift; cmd_new "$@" ;;
