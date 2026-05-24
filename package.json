@@ -10,6 +10,9 @@
   ],
   "os": ["darwin", "linux"],
   "keywords": ["git", "worktree", "bare-repo", "cli", "developer-tools"],
+  "scripts": {
+    "postinstall": "gitree install --shell-only 2>/dev/null || true"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
