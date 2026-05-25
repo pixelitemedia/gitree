@@ -1233,6 +1233,19 @@ cmd_switch() {
         fi
         exit 1
     fi
+    switch_path="${switch_path/#\~/$HOME}"
+
+    # Auto-create the switch directory if it doesn't exist yet,
+    # but only if its parent exists (error if the root destination is missing).
+    if [[ ! -d "$switch_path" ]]; then
+        local parent; parent=$(dirname "$switch_path")
+        if [[ ! -d "$parent" ]]; then
+            printf 'Error: switch location parent does not exist: %s\n' "$parent" >&2
+            exit 1
+        fi
+        mkdir "$switch_path"
+        printf 'Created switch directory: %s\n' "$switch_path" >&2
+    fi
 
     local branch="" name_hint=""
     case $# in
