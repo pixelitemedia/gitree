@@ -95,3 +95,30 @@ Other Claude sessions, Codex, or the user may be working in different worktrees 
 - **Before creating a worktree, run `git worktree list`** to see what's already checked out. Git will refuse to add a worktree for a branch already checked out elsewhere — that's a signal another session may be using it. Don't force-add without explicit confirmation.
 - **If you must `git checkout` inside an existing worktree**, warn first and wait for confirmation.
 - **Don't `git worktree remove` a worktree** without confirming nobody's working in it.
+
+## Branch context
+
+`.gitree-context/` at the workspace root holds per-branch context for all projects.
+It is never committed to any repo — it is local workspace state, synced between
+machines via rsync alongside `.gitree`.
+
+When in a non-main worktree, `.branch-context/` is a symlink to
+`.gitree-context/<project>/<branch>/`. Files:
+
+- `README.md` — what this branch is for (read first)
+- `AGENTS.md` — agent instructions specific to this branch
+- `TODO.md` — feature task list
+- `ROADMAP.md` — milestone/phase breakdown (optional)
+
+**When starting work in a non-main worktree:**
+1. Read `.branch-context/README.md` for branch purpose and context
+2. Read `.branch-context/AGENTS.md` for any specific agent instructions
+3. If both only contain stub content, ask the user what the branch is for and populate them
+4. Keep `TODO.md` current — check off completed items, add new ones as they arise
+
+**Never populate `.branch-context/` in the `main/` worktree** — main has no branch context.
+If `.branch-context/` appears in `main/`, the symlink is stale or misdirected — flag it.
+
+**These files are agent-agnostic.** The workspace config (e.g. CLAUDE.md) is responsible
+for directing agents to read `.branch-context/AGENTS.md`. The context directory itself
+makes no assumptions about which agent is reading it.

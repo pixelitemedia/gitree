@@ -408,6 +408,24 @@ _setup_bare_repo() {
     if [[ "$target" != "." ]]; then
         _config_set_project "$project_name" "$repo"
     fi
+
+    # Initialize branch context directory and add .gitignore entry
+    if [[ -n "${GITREE_WORKSPACE:-}" ]]; then
+        local gitignore="$abs_target/main/.gitignore"
+        if ! grep -qx '.branch-context' "$gitignore" 2>/dev/null; then
+            if [[ ! -f "$gitignore" ]]; then
+                printf '# gitree branch context — local only, never committed\n.branch-context\n' \
+                    > "$gitignore"
+            else
+                printf '\n# gitree branch context — local only, never committed\n.branch-context\n' \
+                    >> "$gitignore"
+            fi
+            git -C "$abs_target/main" add .gitignore
+            git -C "$abs_target/main" commit -m "chore: ignore .branch-context (gitree)"
+        fi
+        mkdir -p "$GITREE_WORKSPACE/.gitree-context/$project_name"
+        printf '✓ Branch context ready (.gitree-context/%s/)\n' "$project_name"
+    fi
 }
 
 _repair_worktrees() {
@@ -485,6 +503,37 @@ _list_project_worktrees() {
             wt=""; branch=""; head=""
         }
     '
+}
+
+_scaffold_branch_context() {
+    local project="$1" branch="$2" wt_path="$3"
+    [[ -n "${GITREE_WORKSPACE:-}" ]] || return 0
+    local dirname; dirname=$(_branch_to_dirname "$branch")
+    local context_dir="$GITREE_WORKSPACE/.gitree-context/$project/$dirname"
+    local link="$wt_path/.branch-context"
+
+    mkdir -p "$context_dir"
+
+    local today; today=$(date +%F)
+
+    [[ -f "$context_dir/README.md" ]] || \
+        printf '# %s\n\n<!-- What is this branch for? -->\n' \
+            "$branch" > "$context_dir/README.md"
+
+    [[ -f "$context_dir/AGENTS.md" ]] || \
+        printf '<!-- branch: %s | created: %s -->\n<!-- See README.md for branch overview -->\n' \
+            "$branch" "$today" > "$context_dir/AGENTS.md"
+
+    [[ -f "$context_dir/TODO.md" ]] || \
+        printf '# TODO — %s\n\n- [ ] \n' "$branch" > "$context_dir/TODO.md"
+
+    [[ -f "$context_dir/ROADMAP.md" ]] || touch "$context_dir/ROADMAP.md"
+
+    local rel
+    rel=$(python3 -c "import os; print(os.path.relpath('$context_dir', '$wt_path'))")
+    ln -sfn "$rel" "$link"
+
+    printf '✓ Branch context scaffolded (.branch-context/)\n' >&2
 }
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -577,6 +626,7 @@ cmd_new() {
     local path
     path=$(_resolve_worktree "$GITREE_BARE_DIR" "$GITREE_PLUGIN_DIR" "$branch")
 
+    _scaffold_branch_context "$GITREE_PLUGIN_NAME" "$branch" "$path"
     _ensure_shell_fn "$path"
     printf '%s\n' "$path"
 }
@@ -802,6 +852,17 @@ cmd_wt() {
     local path
     path=$(_resolve_worktree "$GITREE_BARE_DIR" "$GITREE_PLUGIN_DIR" "$branch")
 
+    if [[ -n "${GITREE_WORKSPACE:-}" && "$branch" != "main" ]]; then
+        local dirname; dirname=$(_branch_to_dirname "$branch")
+        local context_dir="$GITREE_WORKSPACE/.gitree-context/$GITREE_PLUGIN_NAME/$dirname"
+        local link="$path/.branch-context"
+        if [[ -d "$context_dir" && ! -L "$link" ]]; then
+            local rel
+            rel=$(python3 -c "import os; print(os.path.relpath('$context_dir', '$path'))")
+            ln -sfn "$rel" "$link"
+        fi
+    fi
+
     _ensure_shell_fn "$path"
     printf '%s\n' "$path"
 }
@@ -849,6 +910,27 @@ cmd_remove() {
 
     git -C "$GITREE_BARE_DIR" worktree remove --force "$wt_path"
     printf '✓ Removed worktree: %s\n' "$branch"
+
+    if [[ -n "${GITREE_WORKSPACE:-}" ]]; then
+        local context_dir="$GITREE_WORKSPACE/.gitree-context/$GITREE_PLUGIN_NAME/$dirname"
+        if [[ -d "$context_dir" ]]; then
+            local yn=""
+            read -r -p "Archive branch context? [Y/n]: " yn || true
+            case "${yn,,}" in
+                n|no)
+                    rm -rf "$context_dir"
+                    printf '✓ Branch context deleted\n' >&2
+                    ;;
+                *)
+                    local archive="$GITREE_WORKSPACE/.gitree-context/.archived/$GITREE_PLUGIN_NAME/$dirname"
+                    mkdir -p "$(dirname "$archive")"
+                    mv "$context_dir" "$archive"
+                    printf '✓ Branch context archived to .gitree-context/.archived/%s/%s\n' \
+                        "$GITREE_PLUGIN_NAME" "$dirname" >&2
+                    ;;
+            esac
+        fi
+    fi
 }
 
 cmd_drop() {
@@ -957,6 +1039,20 @@ PY
             printf '  %-40s  cloning...\n' "$name"
             _setup_bare_repo "$url" "$name"
             (( restored++ )) || true
+        fi
+        local ctx_root="$workspace/.gitree-context/$name"
+        if [[ -d "$ctx_root" ]]; then
+            for ctx_dir in "$ctx_root"/*/; do
+                [[ -d "$ctx_dir" ]] || continue
+                local ctx_dirname; ctx_dirname=$(basename "$ctx_dir")
+                local wt_path="$workspace/$name/.worktrees/$ctx_dirname"
+                local link="$wt_path/.branch-context"
+                if [[ -d "$wt_path" && ! -L "$link" ]]; then
+                    local rel
+                    rel=$(python3 -c "import os; print(os.path.relpath('$ctx_dir', '$wt_path'))")
+                    ln -sfn "$rel" "$link"
+                fi
+            done
         fi
     done <<< "$projects_json"
 
@@ -1138,7 +1234,7 @@ cat << 'BASH'
 _gitree_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local cmds="list init add new convert audit wt remove switch pull lock unlock install completion --help --version"
+    local cmds="list init add new convert audit wt remove switch pull lock unlock install completion branch-context --help --version"
     case "$prev" in
         gitree)
             COMPREPLY=($(compgen -W "$cmds" -- "$cur")) ;;
@@ -1150,6 +1246,8 @@ _gitree_complete() {
             COMPREPLY=($(compgen -W "multi mono" -- "$cur")) ;;
         completion)
             COMPREPLY=($(compgen -W "bash zsh" -- "$cur")) ;;
+        branch-context)
+            COMPREPLY=($(compgen -W "init" -- "$cur")) ;;
     esac
 }
 complete -F _gitree_complete gitree
@@ -1180,7 +1278,8 @@ _gitree() {
                 'unlock[unlock a worktree]' \
                 'install[install gitree globally]' \
                 'completion[print shell completion script]' \
-                'repair-head[reset bare HEAD to remote default branch]'
+                'repair-head[reset bare HEAD to remote default branch]' \
+                'branch-context[scaffold branch context for existing repos]'
             ;;
         args)
             case ${words[2]} in
@@ -1190,6 +1289,7 @@ _gitree() {
                     _describe 'branch' branches ;;
                 convert) _values 'layout' 'multi' 'mono' ;;
                 completion) _values 'shell' 'bash' 'zsh' ;;
+                branch-context) _values 'action' 'init' ;;
             esac
             ;;
     esac
@@ -1209,6 +1309,86 @@ if _ws=$(_find_workspace_root 2>/dev/null); then
     GITREE_WORKSPACE="$_ws"
     _load_config "$_ws"
 fi
+
+cmd_branch_context() {
+    local action="${1:-}"
+    case "$action" in
+        init) shift; _branch_context_init "$@" ;;
+        *)
+            printf 'Usage: gitree branch-context init [<project>|*]\n' >&2
+            exit 1
+            ;;
+    esac
+}
+
+_branch_context_init() {
+    local name_hint="${1:-}"
+    local workspace="${GITREE_WORKSPACE:-}"
+    [[ -z "$workspace" ]] && { printf 'Error: no .gitree config found\n' >&2; exit 1; }
+
+    _bc_init_project() {
+        local pdir="$1" pname="$2"
+
+        local gitignore="$pdir/main/.gitignore"
+        if ! grep -qx '.branch-context' "$gitignore" 2>/dev/null; then
+            if [[ ! -f "$gitignore" ]]; then
+                printf '# gitree branch context — local only, never committed\n.branch-context\n' \
+                    > "$gitignore"
+            else
+                printf '\n# gitree branch context — local only, never committed\n.branch-context\n' \
+                    >> "$gitignore"
+            fi
+            git -C "$pdir/main" add .gitignore
+            git -C "$pdir/main" commit -m "chore: ignore .branch-context (gitree)"
+            printf '  %s: added .branch-context to .gitignore\n' "$pname"
+        else
+            printf '  %s: .gitignore already has .branch-context\n' "$pname"
+        fi
+
+        mkdir -p "$workspace/.gitree-context/$pname"
+
+        if [[ -d "$pdir/.worktrees" ]]; then
+            for wt_dir in "$pdir/.worktrees"/*/; do
+                [[ -d "$wt_dir" ]] || continue
+                local branch
+                branch=$(git -C "$wt_dir" branch --show-current 2>/dev/null) || continue
+                [[ -n "$branch" ]] || continue
+                _scaffold_branch_context "$pname" "$branch" "$wt_dir"
+            done
+        fi
+
+        printf '✓ %s: branch context initialized\n' "$pname"
+    }
+
+    # mono-repo
+    if [[ -d "$workspace/.bare" ]]; then
+        _bc_init_project "$workspace" "$(basename "$workspace")"
+        return
+    fi
+
+    # multi-repo
+    if [[ "$name_hint" == "*" ]]; then
+        local found=0
+        for pdir in "$workspace"/*/; do
+            [[ -d "${pdir%/}/.bare" ]] || continue
+            found=1
+            _bc_init_project "${pdir%/}" "$(basename "${pdir%/}")"
+        done
+        [[ $found -eq 0 ]] && printf 'No projects found in workspace\n'
+        return
+    fi
+
+    if [[ -n "$name_hint" ]]; then
+        local pdir="$workspace/$name_hint"
+        [[ -d "$pdir/.bare" ]] || { printf 'Error: project "%s" not found\n' "$name_hint" >&2; exit 1; }
+        _bc_init_project "$pdir" "$name_hint"
+    else
+        if ! _resolve_plugin ""; then
+            printf 'Error: not inside a project directory, and no project name given\n' >&2; exit 1
+        fi
+        _bc_init_project "$GITREE_PLUGIN_DIR" "$GITREE_PLUGIN_NAME"
+    fi
+}
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 
@@ -1253,7 +1433,8 @@ _help() {
     printf '%sTools%s\n' "$b" "$r"
     printf '  %sinstall%s [--shell-only] [<dir>]    install gitree globally + wt() shell function\n' "$g" "$r"
     printf '  %scompletion%s <bash|zsh>             print shell completion script\n' "$g" "$r"
-    printf '  %srepair-head%s                       reset bare HEAD to remote default branch\n\n' "$g" "$r"
+    printf '  %srepair-head%s                       reset bare HEAD to remote default branch\n' "$g" "$r"
+    printf '  %sbranch-context init%s [<project>|*] scaffold .gitree-context/ for existing repos\n\n' "$g" "$r"
 
     printf '%sConfig%s  %s.gitree (JSON) at workspace root%s\n' "$b" "$r" "$d" "$r"
     printf '  %s{ "switch": { "default": "/path/", "wpml": "/path2/" } }%s\n\n' "$d" "$r"
@@ -1297,6 +1478,7 @@ main() {
         restore)      cmd_restore ;;
         drop)         shift; cmd_drop "$@" ;;
         repair-head)  cmd_repair_head ;;
+        branch-context) shift; cmd_branch_context "$@" ;;
         completion) shift; cmd_completion "$@" ;;
         -v|--version|version) printf 'gitree %s\n' "$GITREE_VERSION" ;;
         -h|--help|help) _help ;;
