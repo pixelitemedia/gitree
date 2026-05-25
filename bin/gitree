@@ -716,9 +716,9 @@ cmd_add() {
     local mono=false
     if [[ -z "$target" ]]; then
         local yn=""
-        read -r -p "Single-repo gitree (repo IS the workspace root)? [y/N]: " yn || true
-        case "${yn,,}" in
-            y|yes) mono=true; target="." ;;
+        read -r -p "Mono-repo layout (clone into workspace root, no subdirectory)? [y/N]: " yn || true
+        case "$yn" in
+            [Yy]|[Yy][Ee][Ss]) mono=true; target="." ;;
             *)
                 local name_input=""
                 read -r -p "Project folder name [$default_name]: " name_input || true
@@ -1046,7 +1046,10 @@ cmd_remove() {
         printf 'Warning: %s has uncommitted changes.\n' "$branch" >&2
         local yn=""
         read -r -p "Remove anyway? [y/N]: " yn || true
-        [[ "${yn,,}" == "y" || "${yn,,}" == "yes" ]] || { printf 'Aborted.\n'; return 0; }
+        case "$yn" in
+            [Yy]|[Yy][Ee][Ss]) ;;
+            *) printf 'Aborted.\n'; return 0 ;;
+        esac
     fi
 
     git -C "$GITREE_BARE_DIR" worktree remove --force "$wt_path"
@@ -1057,8 +1060,8 @@ cmd_remove() {
         if [[ -d "$context_dir" ]]; then
             local yn=""
             read -r -p "Archive branch context? [Y/n]: " yn || true
-            case "${yn,,}" in
-                n|no)
+            case "$yn" in
+                [Nn]|[Nn][Oo])
                     rm -rf "$context_dir"
                     printf '✓ Branch context deleted\n' >&2
                     ;;
@@ -1089,7 +1092,10 @@ cmd_drop() {
     printf 'This will permanently delete %s and all its worktrees.\n' "$name"
     local yn=""
     read -r -p "Continue? [y/N]: " yn || true
-    [[ "${yn,,}" == "y" || "${yn,,}" == "yes" ]] || { printf 'Aborted.\n'; return 0; }
+    case "$yn" in
+        [Yy]|[Yy][Ee][Ss]) ;;
+        *) printf 'Aborted.\n'; return 0 ;;
+    esac
 
     # Prune git's worktree registrations first so git doesn't complain
     git -C "$pdir/.bare" worktree prune 2>/dev/null || true
