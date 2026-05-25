@@ -7,6 +7,36 @@
 
 gitree manages git repos as bare repos with linked worktrees. Read `.gitree` at the workspace root for the authoritative project list (`projects` key) and runtime switch paths (`switch.*` keys).
 
+## Context file roles and anti-drift rules
+
+Each piece of information lives in exactly one place at the right level. Higher-level files define structure and relationships — they do not summarise or echo lower-level files. When something changes, update it in one place only.
+
+### AGENTS.md
+Operational instructions for working in a project: conventions, tooling constraints, how-tos specific to this codebase. Not a task list, not a README summary.
+
+- **Update when:** conventions change, new constraints are discovered, tooling changes.
+- **Don't:** duplicate README context, list tasks, describe roadmap plans, repeat gitree basics already covered at the workspace level.
+
+### README.md
+Persistent context about what a project is — architecture, purpose, relationships to other repos. Written for both humans and agents starting cold.
+
+- **Update when:** architecture changes, scope changes, key relationships shift.
+- **Don't:** include task-level detail, branch-specific work, or ephemeral state.
+
+### TODO.md
+At the workspace or project root: only cross-repo organisation tasks, or triage items with no branch home yet. Per-branch work lives in `.branch-context/TODO.md`.
+
+- **Update when:** a genuine workspace-level task exists with no natural branch.
+- **Don't:** copy branch TODOs here, add implementation detail, let it grow stale.
+
+### ROADMAP.md
+High-level direction relevant to multiple repos — phases, milestone groupings, strategic pivots. Create at the workspace root only if direction spans multiple projects; individual feature planning belongs in branches.
+
+- **Update when:** multi-repo strategy changes.
+- **Don't:** duplicate per-feature detail that belongs in a branch; create this file if it would only describe a single repo's work.
+
+---
+
 ## Per-project layout
 
 Every project in a gitree workspace follows this structure:
@@ -76,14 +106,6 @@ gitree audit
 
 Branch names with slashes map to dir names with `--` (`codex/foo` → `.worktrees/codex--foo/`). Always pass the real branch name — gitree handles the translation.
 
-## Shell function
-
-`gitree install` adds this to your rc for one-word navigation:
-```bash
-wt() { local d; d=$(gitree wt "$@") && cd "$d"; }
-```
-`wt feature/foo` from anywhere inside a project creates the worktree and drops you in it.
-
 ## Removing worktrees
 
 ```bash
@@ -114,6 +136,8 @@ When in a non-main worktree, `.branch-context/` is a symlink to
 - `AGENTS.md` — agent instructions specific to this branch
 - `TODO.md` — feature task list
 - `ROADMAP.md` — milestone/phase breakdown (optional)
+
+See **Context file roles** above for how to maintain each of these files without drift.
 
 **When starting work in a non-main worktree:**
 1. Read `.branch-context/README.md` for branch purpose and context
