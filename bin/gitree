@@ -1119,7 +1119,7 @@ cmd_pull() {
         fi
     }
 
-    if [[ "$name_hint" == "*" ]]; then
+    if [[ "$name_hint" == "*" || $# -gt 1 ]]; then
         [[ -z "$workspace" ]] && { printf 'Error: no workspace root\n' >&2; exit 1; }
         for pdir in "$workspace"/*/; do
             [[ -d "$pdir/.bare" ]] || continue
@@ -1142,8 +1142,10 @@ cmd_lock() {
     local name_hint="${1:-}"
     local worktree_name="${2:-main}"
     local workspace="${GITREE_WORKSPACE:-}"
+    # shell-expanded '*': $2 onwards are filenames, not a worktree name
+    [[ $# -gt 2 ]] && worktree_name="main"
 
-    if [[ "$name_hint" == "*" ]]; then
+    if [[ "$name_hint" == "*" || $# -gt 2 ]]; then
         [[ -z "$workspace" ]] && { printf 'Error: no workspace root\n' >&2; exit 1; }
         for pdir in "$workspace"/*/; do
             [[ -d "$pdir/.bare" ]] || continue
@@ -1162,8 +1164,10 @@ cmd_unlock() {
     local name_hint="${1:-}"
     local worktree_name="${2:-main}"
     local workspace="${GITREE_WORKSPACE:-}"
+    # shell-expanded '*': $2 onwards are filenames, not a worktree name
+    [[ $# -gt 2 ]] && worktree_name="main"
 
-    if [[ "$name_hint" == "*" ]]; then
+    if [[ "$name_hint" == "*" || $# -gt 2 ]]; then
         [[ -z "$workspace" ]] && { printf 'Error: no workspace root\n' >&2; exit 1; }
         for pdir in "$workspace"/*/; do
             [[ -d "$pdir/.bare" ]] || continue
