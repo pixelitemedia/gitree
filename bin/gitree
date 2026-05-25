@@ -1355,7 +1355,8 @@ _branch_context_init() {
     fi
 
     # multi-repo
-    if [[ "$name_hint" == "*" ]]; then
+    # $# -gt 1 handles shell-expanded '*' (e.g. `init *` expands to filenames in cwd)
+    if [[ "$name_hint" == "*" || $# -gt 1 ]]; then
         local found=0
         for pdir in "$workspace"/*/; do
             [[ -d "${pdir%/}/.bare" ]] || continue
