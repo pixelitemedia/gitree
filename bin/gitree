@@ -362,6 +362,98 @@ f.write("\n")
 PY
 }
 
+# ── Workspace AGENTS.md ──────────────────────────────────────────────────────
+
+_write_workspace_agents_md() {
+    local workspace="$1"
+    local dest="$workspace/.gitree-context/AGENTS.md"
+    [[ -f "$dest" ]] && return 0
+    mkdir -p "$workspace/.gitree-context"
+    cat > "$dest" << 'AGENTS_EOF'
+# gitree — bare-repo-with-worktrees workspace
+
+gitree manages git repos as bare repos with linked worktrees. Read `.gitree` at the
+workspace root for the authoritative project list (`projects` key) and runtime switch
+paths (`switch.*` keys).
+
+## Per-project layout
+
+```
+<project>/
+├── .bare/              ← bare repo: refs, objects, worktree metadata
+├── .git                ← 1-line file: "gitdir: ./.bare"
+├── main/               ← default working surface (main branch checked out here)
+└── .worktrees/         ← additional worktrees, created on demand
+    └── <branch>/
+```
+
+## Where git commands work
+
+- **Inside a worktree** (`main/`, `.worktrees/<branch>/`) — everything works normally.
+- **From the project container** (`<project>/`) — read-only ops only: `git log`,
+  `git branch -a`, `git worktree list`. `git status` errors with "must be run in a
+  work tree" — this is expected.
+- **Default working surface is `main/`** unless explicitly directed elsewhere.
+
+## Key gitree commands
+
+```bash
+gitree list [<project>]                          # list worktrees and load state
+gitree new [<project>] <branch>                  # create branch + worktree
+gitree wt [<project>] <branch>                   # get or create worktree; print path
+gitree switch [-l <loc>] [<project>] [<branch>]  # point switch symlink at a worktree
+gitree remove [<project>] <branch>               # remove a worktree safely
+gitree audit [<project>]                         # show branches with no worktree yet
+gitree repair-head [<project>|*]                 # fix bare HEAD drift
+gitree restore                                   # clone all projects in .gitree manifest
+```
+
+Shell functions added by `gitree install`:
+```bash
+wt()          { local d; d=$(gitree wt   "$@") && cd "$d"; }
+gitree-goto() { local d; d=$(gitree goto "$@") && cd "$d"; }
+```
+
+Branch names with `/` map to dir names with `--` (`feature/foo` → `.worktrees/feature--foo/`).
+Always pass the real branch name — gitree handles the translation.
+
+## Multi-session safety
+
+Multiple agents or the user may work in different worktrees simultaneously:
+
+- **Stay in the worktree you were opened in.** Don't `cd` into a sibling worktree without
+  explicit instruction.
+- **Don't `git checkout <branch>` inside an existing worktree.** Use `gitree wt <branch>`
+  to get a dedicated worktree instead. Switching branches inside `main/` may overwrite
+  another session's uncommitted changes.
+- **Before creating a worktree**, run `git worktree list` to check what's already checked
+  out. Git will refuse to add a worktree for a branch already checked out elsewhere.
+- **Don't `git worktree remove`** without confirming nobody else is working in it.
+
+## Branch context
+
+`.gitree-context/` at the workspace root holds per-branch context for all projects.
+Never committed — local workspace state, synced between machines via rsync alongside `.gitree`.
+
+In a non-main worktree, `.branch-context/` is a symlink to
+`.gitree-context/<project>/<branch>/`. Files:
+
+- `README.md` — what this branch is for (read first)
+- `AGENTS.md` — agent instructions specific to this branch
+- `TODO.md` — task list
+- `ROADMAP.md` — milestone breakdown (optional)
+
+**When starting work in a non-main worktree:**
+1. Read `.branch-context/README.md` and `.branch-context/AGENTS.md`
+2. If both are stubs, ask the user what the branch is for and fill them in
+3. Keep `TODO.md` current as you work
+
+**Never write `.branch-context/` files in the `main/` worktree** — main has no branch
+context. A `.branch-context` symlink appearing in `main/` is stale — flag it.
+AGENTS_EOF
+    printf '✓ Workspace agent guide written (.gitree-context/AGENTS.md)\n' >&2
+}
+
 # ── Bare repo setup ───────────────────────────────────────────────────────────
 
 _setup_bare_repo() {
@@ -559,6 +651,10 @@ cmd_init() {
     GITREE_WORKSPACE="$PWD"
     _load_config "$PWD"
 
+    _write_workspace_agents_md "$PWD"
+    printf '\nTip: add to your CLAUDE.md (or equivalent agent config):\n'
+    printf '  See .gitree-context/AGENTS.md for workspace agent instructions.\n\n'
+
     _ensure_shell_fn
 }
 
@@ -594,6 +690,7 @@ cmd_add() {
         GITREE_WORKSPACE="$PWD"
         _load_config "$PWD"
         printf 'Initialized gitree workspace at %s\n' "$PWD"
+        _write_workspace_agents_md "$PWD"
     fi
 
     _setup_bare_repo "$repo" "$target"
@@ -1317,6 +1414,8 @@ _branch_context_init() {
     local name_hint="${1:-}"
     local workspace="${GITREE_WORKSPACE:-}"
     [[ -z "$workspace" ]] && { printf 'Error: no .gitree config found\n' >&2; exit 1; }
+
+    _write_workspace_agents_md "$workspace"
 
     _bc_init_project() {
         local pdir="$1" pname="$2"
