@@ -6,7 +6,8 @@
     "gitree": "bin/gitree"
   },
   "files": [
-    "bin/gitree"
+    "bin/gitree",
+    "bin/AGENTS.md"
   ],
   "os": ["darwin", "linux"],
   "keywords": ["git", "worktree", "bare-repo", "cli", "developer-tools"],

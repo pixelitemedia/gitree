@@ -29,15 +29,16 @@ Built for Marcus's WordPress plugin workflow: multiple plugins, multiple WP inst
 ## File layout
 
 ```
-bin/gitree          ← the entire CLI (single bash script, ~800 lines)
+bin/gitree          ← the entire CLI (single bash script)
+bin/AGENTS.md       ← full workspace agent guide; shipped with the tool; symlinked
+                      from other workspaces (e.g. wordpress-plugins/AGENTS.md)
 package.json        ← npm package metadata + postinstall hook
 CLAUDE.md           ← this file (Claude operating guide for this project)
-CLAUDE.gitree.md    ← Claude instructions for sessions INSIDE a gitree workspace
 CONTEXT-SPEC.md     ← spec for .gitree-context/ branch-context scaffolding feature
-README.md           ← public-facing docs + achievements
-TODO.md             ← immediate tasks
-ROADMAP.md          ← larger ideas + future phases
 ```
+
+Project working files (README, TODO, ROADMAP) live at `../.gitree-context/gitree/`
+following the mono-repo convention — they are local workspace state, not in the repo.
 
 ## How to work in this project
 
