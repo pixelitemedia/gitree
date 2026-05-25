@@ -35,6 +35,10 @@ High-level direction relevant to multiple repos — phases, milestone groupings,
 - **Update when:** multi-repo strategy changes.
 - **Don't:** duplicate per-feature detail that belongs in a branch; create this file if it would only describe a single repo's work.
 
+### Mono-repo workspaces
+
+When the workspace contains a single project, skip the workspace-root level for README/TODO/ROADMAP — place them at `.gitree-context/<project>/` alongside the branch subdirectories. The workspace `AGENTS.md` stays at root as the entry point, but project context lives one level deeper, matching the branch context structure directly.
+
 ---
 
 ## Per-project layout

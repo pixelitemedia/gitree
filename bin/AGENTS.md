@@ -1,68 +1,47 @@
-# gitree — multi-site WordPress testing
+# gitree — multi-environment testing with switch locations
 
-This file is agent context for gitree workspaces that use `switch.*` locations to test
-plugins across multiple WordPress installs. Read `AGENTS.md` and `.gitree-context/AGENTS.md`
-at the workspace root for project-specific site topology.
+Agent context for gitree workspaces that use `switch.*` locations to target
+different runtime environments. Read `.gitree-context/AGENTS.md` at the workspace
+root for the project-specific environment topology.
 
 ---
 
-## How `gitree switch -l` maps to WordPress sites
+## How `gitree switch -l` maps to environments
 
-Each `switch.*` key in `.gitree` points to a `WP_PLUGIN_DIR` for a distinct WordPress
-install. Use `-l <location>` to target plugins on that site:
+Each `switch.*` key in `.gitree` points to a directory in the runtime where a symlink
+from `<location>/<project>` will be managed. Use `-l <location>` to target a specific
+environment:
 
 ```bash
 gitree switch [-l <location>] [<project>] [<branch>]
 
-gitree switch events-manager gutenberg-v1          # default site
-gitree switch -l wpml events-manager gutenberg-v1  # wpml site
-gitree switch -l wpml events-manager               # back to main on wpml site
+gitree switch <project> <branch>          # default environment
+gitree switch -l <loc> <project> <branch> # named environment
+gitree switch -l <loc> <project>          # back to main on that environment
 ```
 
 ### What happens physically
 
 ```
-plugins-wpml/events-manager          ← symlink in the site's WP_PLUGIN_DIR
-  → <workspace>/events-manager/main  ← gitree updates THIS symlink
-    → events-manager/.worktrees/gutenberg-v1/  ← the actual worktree
+<switch-dir>/<project>          ← symlink in the runtime's target directory
+  → <workspace>/<project>/main  ← gitree updates THIS symlink
+    → <project>/.worktrees/<branch>/  ← the actual worktree
 ```
 
-The symlink gitree manages is the one inside `WP_PLUGIN_DIR`, pointing at the worktree.
-No plugin files are copied — a switch is just a symlink retarget.
+The symlink gitree manages is the one inside the switch directory, pointing at the
+active worktree. Nothing is copied — a switch is a symlink retarget.
 
 ---
 
-## Verifying what version is running
+## Verifying the active version
 
 ```bash
-# Confirm WP_PLUGIN_DIR and loaded plugin version on a specific domain:
-wp --url=<domain> eval '
-  echo WP_PLUGIN_DIR . "\n";
-  $d = get_plugin_data( WP_PLUGIN_DIR . "/<plugin>/<plugin>.php" );
-  echo $d["Version"] . "\n";
-'
-
-# List all active plugins on a domain:
-wp --url=<domain> plugin list
-
-# Check worktrees and current switch state:
+# Check worktrees and current switch state across all projects:
 gitree list
+
+# Inspect a specific switch symlink:
+readlink <switch-path>/<project>
 ```
-
----
-
-## Custom plugin directories
-
-When a site uses a custom `WP_PLUGIN_DIR` (e.g. `plugins-wpml/`), entries in that dir
-fall into two categories:
-
-| Kind | Target | Notes |
-|---|---|---|
-| **Gitree override** | `→ <workspace>/<project>/main` | Managed by `gitree switch -l`; retargeted on each switch |
-| **Fallback symlink** | `→ ../plugins/<name>` | Legacy; points back to default plugin dir |
-
-Plugins with no entry in the custom dir are loaded transparently from the default
-`plugins/` dir by the WP Gitree mu-plugin — no symlinks needed.
 
 ---
 
@@ -75,6 +54,6 @@ gitree list
 # Switch
 gitree switch -l <location> <project> <branch>
 
-# Verify (opcache.revalidate_path=1 means no server restart needed)
-wp --url=<domain> eval 'echo get_plugin_data(WP_PLUGIN_DIR."/<plugin>/<plugin>.php")["Version"]."\n";'
+# Verify the runtime is now serving the new worktree
+readlink <switch-path>/<project>
 ```
