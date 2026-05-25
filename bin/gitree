@@ -620,11 +620,10 @@ _list_project_worktrees() {
 }
 
 _scaffold_branch_context() {
-    local project="$1" branch="$2" wt_path="$3"
+    local project="$1" branch="$2" wt_path="${3:-}"
     [[ -n "${GITREE_WORKSPACE:-}" ]] || return 0
     local dirname; dirname=$(_branch_to_dirname "$branch")
     local context_dir="$GITREE_WORKSPACE/.gitree-context/$project/$dirname"
-    local link="$wt_path/.branch-context"
 
     mkdir -p "$context_dir"
 
@@ -643,11 +642,18 @@ _scaffold_branch_context() {
 
     [[ -f "$context_dir/ROADMAP.md" ]] || touch "$context_dir/ROADMAP.md"
 
-    local rel
-    rel=$(python3 -c "import os; print(os.path.relpath('$context_dir', '$wt_path'))")
-    ln -sfn "$rel" "$link"
-
-    printf '✓ Branch context scaffolded (.branch-context/)\n' >&2
+    # Wire the .branch-context symlink only when a worktree exists for this branch.
+    # Branches without worktrees still get their context dir + stub files, ready for
+    # whenever a worktree gets created.
+    if [[ -n "$wt_path" && -d "$wt_path" ]]; then
+        local link="$wt_path/.branch-context"
+        local rel
+        rel=$(python3 -c "import os; print(os.path.relpath('$context_dir', '$wt_path'))")
+        ln -sfn "$rel" "$link"
+        printf '✓ Branch context scaffolded + symlinked (%s)\n' "$branch" >&2
+    else
+        printf '✓ Branch context scaffolded (%s — no worktree yet)\n' "$branch" >&2
+    fi
 }
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -1458,14 +1464,18 @@ _branch_context_init() {
 
         mkdir -p "$workspace/.gitree-context/$pname"
 
-        if [[ -d "$pdir/.worktrees" ]]; then
-            for wt_dir in "$pdir/.worktrees"/*/; do
-                [[ -d "$wt_dir" ]] || continue
-                local branch
-                branch=$(git -C "$wt_dir" branch --show-current 2>/dev/null) || continue
-                [[ -n "$branch" ]] || continue
-                _scaffold_branch_context "$pname" "$branch" "$wt_dir"
-            done
+        # Scaffold context for every branch in the bare repo (skip main).
+        # Branches with existing worktrees also get the .branch-context symlink wired.
+        local bare="$pdir/.bare"
+        [[ -d "$bare" ]] || bare="$pdir/.git"
+        if [[ -d "$bare" || -f "$bare" ]]; then
+            while IFS= read -r branch; do
+                [[ -z "$branch" || "$branch" == "main" ]] && continue
+                local dirname; dirname=$(_branch_to_dirname "$branch")
+                local wt_path="$pdir/.worktrees/$dirname"
+                [[ -d "$wt_path" ]] || wt_path=""
+                _scaffold_branch_context "$pname" "$branch" "$wt_path"
+            done < <(git -C "$pdir" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)
         fi
 
         printf '✓ %s: branch context initialized\n' "$pname"
