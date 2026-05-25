@@ -19,7 +19,7 @@
 #   gitree pull [<project>|*]               fetch + fast-forward main worktree
 #   gitree lock [<project>|*] [<worktree>]  lock a worktree against branch switching
 #   gitree unlock [<project>|*] [<worktree>] remove the lock
-#   gitree install [--shell-only] [<dir>]   install gitree globally and the wt() shell fn
+#   gitree install [--shell-only|--no-shell] [<dir>]  install gitree globally and the wt() shell fn
 #   gitree completion <bash|zsh>            print shell completion script
 #
 # .gitree config (JSON, at workspace root):
@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-GITREE_VERSION="1.0.0"
+GITREE_VERSION="1.1.0"
 
 # ── Platform helpers ──────────────────────────────────────────────────────────
 
@@ -608,13 +608,19 @@ _check_head_drift() {
 }
 
 _list_project_worktrees() {
-    local bare="$1"
+    local bare="$1" pdir="${2%/}"  # strip any trailing slash
     local locked
     locked=$(git -C "$bare" config --get-all gitree.locked 2>/dev/null | tr '\n' ':' || true)
 
-    git -C "$bare" worktree list --porcelain | awk -v locked="$locked" '
+    git -C "$bare" worktree list --porcelain | awk -v locked="$locked" -v pdir="$pdir" '
         BEGIN { n = split(locked, larr, ":") }
-        /^worktree / { wt=$2; wtname=wt; sub(".*/", "", wtname) }
+        /^worktree / {
+            wt = $2
+            wtname = wt; sub(".*/", "", wtname)
+            display = wt
+            if (pdir != "" && substr(wt, 1, length(pdir)) == pdir)
+                display = substr(wt, length(pdir) + 2)
+        }
         /^branch /   { branch=substr($0,8); sub("refs/heads/","",branch) }
         /^HEAD /     { head=substr($0,6) }
         /^$/ {
@@ -622,11 +628,11 @@ _list_project_worktrees() {
                 lk = ""
                 for (i=1; i<=n; i++) if (larr[i] == wtname) { lk = "  [locked]"; break }
                 if (branch != "")
-                    printf "  %-48s  (branch: %s)%s\n", wt, branch, lk
+                    printf "  %-36s  (branch: %s)%s\n", display, branch, lk
                 else
-                    printf "  %-48s  (detached: %s)%s\n", wt, substr(head,1,10), lk
+                    printf "  %-36s  (detached: %s)%s\n", display, substr(head,1,10), lk
             }
-            wt=""; branch=""; head=""
+            wt=""; display=""; branch=""; head=""
         }
     '
 }
@@ -888,7 +894,7 @@ cmd_list() {
     _print_project() {
         local pdir="$1"
         printf '\n%s:\n' "$(basename "$pdir")"
-        _list_project_worktrees "$pdir/.bare"
+        _list_project_worktrees "$pdir/.bare" "$pdir"
         _check_head_drift "$pdir/.bare"
     }
 
@@ -1090,6 +1096,21 @@ cmd_remove() {
     git -C "$GITREE_BARE_DIR" worktree remove --force "$wt_path"
     printf '✓ Removed worktree: %s\n' "$branch"
 
+    # Offer to delete from remote
+    if git -C "$GITREE_BARE_DIR" remote get-url origin >/dev/null 2>&1; then
+        local yn=""
+        read -r -p "Delete branch '$branch' from remote? [y/N]: " yn || true
+        case "$yn" in
+            [Yy]|[Yy][Ee][Ss])
+                if git -C "$GITREE_BARE_DIR" push origin --delete "$branch" 2>/dev/null; then
+                    printf '✓ Deleted %s from remote\n' "$branch"
+                else
+                    printf 'Could not delete from remote (branch may not exist there)\n' >&2
+                fi
+                ;;
+        esac
+    fi
+
     if [[ -n "${GITREE_WORKSPACE:-}" ]]; then
         local context_dir; context_dir="$(_project_context_root "$GITREE_PLUGIN_NAME")/$dirname"
         if [[ -d "$context_dir" ]]; then
@@ -1136,6 +1157,21 @@ cmd_drop() {
     rm -rf "$pdir"
     _config_remove_project "$name"
     printf '✓ Dropped %s\n' "$name"
+
+    # Clean up stale switch symlinks
+    while IFS=$'\t' read -r loc_name loc_path; do
+        [[ -z "$loc_path" ]] && continue
+        loc_path="${loc_path/#\~/$HOME}"
+        local sym="$loc_path/$name"
+        if [[ -L "$sym" ]]; then
+            rm -f "$sym"
+            if [[ "$loc_name" == "default" ]]; then
+                printf '✓ Removed stale switch symlink: %s\n' "$sym"
+            else
+                printf '✓ Removed stale switch symlink [%s]: %s\n' "$loc_name" "$sym"
+            fi
+        fi
+    done < <(_list_switch_locations)
 }
 
 cmd_switch() {
@@ -1147,6 +1183,45 @@ cmd_switch() {
             *) printf 'Unknown flag: %s\n' "$1" >&2; exit 1 ;;
         esac
     done
+
+    # No project/branch args: print current switch state
+    if [[ $# -eq 0 ]]; then
+        local workspace="${GITREE_WORKSPACE:-}"
+        local found=0
+        while IFS=$'\t' read -r loc_name loc_path; do
+            [[ "$location" != "default" && "$loc_name" != "$location" ]] && continue
+            [[ -z "$loc_path" ]] && continue
+            loc_path="${loc_path/#\~/$HOME}"
+            [[ -d "$loc_path" ]] || continue
+            found=1
+            if [[ "$loc_name" == "default" ]]; then
+                printf 'Switch state (%s):\n' "$loc_path"
+            else
+                printf 'Switch state [%s] (%s):\n' "$loc_name" "$loc_path"
+            fi
+            local printed=0
+            for sym in "$loc_path"/*/; do
+                sym="${sym%/}"
+                [[ -L "$sym" ]] || continue
+                local target; target=$(readlink "$sym")
+                local name; name=$(basename "$sym")
+                [[ -z "$workspace" || "$target" == "$workspace"/* ]] || continue
+                local rel="${target##*"$name"/}"
+                printf '  %-36s → %s\n' "$name" "$rel"
+                printed=1
+            done
+            [[ $printed -eq 0 ]] && printf '  (none)\n'
+        done < <(_list_switch_locations)
+        if [[ $found -eq 0 ]]; then
+            if [[ "$location" == "default" ]]; then
+                printf 'No switch locations configured in .gitree\n' >&2
+            else
+                printf 'Error: switch location "%s" not found in .gitree\n' "$location" >&2
+            fi
+            exit 1
+        fi
+        return
+    fi
 
     local switch_path
     switch_path=$(_get_switch_path "$location")
@@ -1161,7 +1236,6 @@ cmd_switch() {
 
     local branch="" name_hint=""
     case $# in
-        0) : ;;
         1) branch="$1" ;;
         *) name_hint="$1"; branch="$2" ;;
     esac
@@ -1366,11 +1440,12 @@ cmd_unlock() {
 }
 
 cmd_install() {
-    local shell_only=false
+    local shell_only=false no_shell=false
     local install_dir="/usr/local/bin"
     for arg in "$@"; do
         case "$arg" in
             --shell-only) shell_only=true ;;
+            --no-shell)   no_shell=true ;;
             *) install_dir="$arg" ;;
         esac
     done
@@ -1389,6 +1464,8 @@ cmd_install() {
                 "$install_dir" "$self" >&2
         fi
     fi
+
+    [[ "$no_shell" == "true" ]] && return 0
 
     if _shell_fn_installed && _goto_fn_installed; then
         printf 'Shell functions wt() and gitree-goto() already installed.\n'
@@ -1421,20 +1498,43 @@ cat << 'BASH'
 _gitree_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local cmds="list init add new convert audit wt remove switch pull lock unlock install completion branch-context --help --version"
+    local cmd="${COMP_WORDS[1]}"
+    local cmds="list init add new convert audit wt goto remove switch pull lock unlock install completion branch-context repair-head drop restore --help --version"
+
+    _gitree_projects() {
+        local d="$PWD" ws=""
+        while [[ "$d" != "/" ]]; do
+            if [[ -f "$d/.gitree" ]]; then ws="$d"; break; fi
+            d=$(dirname "$d")
+        done
+        [[ -z "$ws" ]] && return
+        local p
+        for p in "$ws"/*/; do
+            [[ -d "${p%/}/.bare" ]] && printf '%s ' "$(basename "${p%/}")"
+        done
+    }
+
     case "$prev" in
         gitree)
             COMPREPLY=($(compgen -W "$cmds" -- "$cur")) ;;
         goto|wt|new|switch|lock|unlock|remove)
-            local branches
-            branches=$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)
-            COMPREPLY=($(compgen -W "$branches" -- "$cur")) ;;
+            local branches projects
+            branches=$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' ')
+            projects=$(_gitree_projects 2>/dev/null)
+            COMPREPLY=($(compgen -W "$branches $projects" -- "$cur")) ;;
         convert)
             COMPREPLY=($(compgen -W "multi mono" -- "$cur")) ;;
         completion)
             COMPREPLY=($(compgen -W "bash zsh" -- "$cur")) ;;
         branch-context)
             COMPREPLY=($(compgen -W "init" -- "$cur")) ;;
+        *)
+            case "$cmd" in
+                goto|wt|new|switch|lock|unlock|remove)
+                    local branches
+                    branches=$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' ')
+                    COMPREPLY=($(compgen -W "$branches" -- "$cur")) ;;
+            esac ;;
     esac
 }
 complete -F _gitree_complete gitree
@@ -1447,6 +1547,20 @@ cat << 'ZSH'
 _gitree() {
     local state
     _arguments '1: :->cmd' '*: :->args'
+
+    _gitree_projects() {
+        local d="$PWD" ws=""
+        while [[ "$d" != "/" ]]; do
+            [[ -f "$d/.gitree" ]] && { ws="$d"; break }
+            d="${d:h}"
+        done
+        [[ -z "$ws" ]] && return
+        local p
+        for p in "$ws"/*/; do
+            [[ -d "${p%/}/.bare" ]] && print -r -- "${${p%/}:t}"
+        done
+    }
+
     case $state in
         cmd)
             _values 'command' \
@@ -1463,6 +1577,8 @@ _gitree() {
                 'pull[fetch and fast-forward]' \
                 'lock[lock a worktree]' \
                 'unlock[unlock a worktree]' \
+                'drop[remove a project]' \
+                'restore[clone all manifest projects]' \
                 'install[install gitree globally]' \
                 'completion[print shell completion script]' \
                 'repair-head[reset bare HEAD to remote default branch]' \
@@ -1470,10 +1586,13 @@ _gitree() {
             ;;
         args)
             case ${words[2]} in
-                goto|wt|new|switch|lock|unlock|remove)
-                    local branches
+                goto|wt|new|remove|switch|lock|unlock)
+                    local branches projects
                     branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)"})
-                    _describe 'branch' branches ;;
+                    projects=(${(f)"$(_gitree_projects 2>/dev/null)"})
+                    _describe 'branch' branches
+                    [[ ${#projects} -gt 0 ]] && _describe 'project' projects
+                    ;;
                 convert) _values 'layout' 'multi' 'mono' ;;
                 completion) _values 'shell' 'bash' 'zsh' ;;
                 branch-context) _values 'action' 'init' ;;
@@ -1611,7 +1730,7 @@ _help() {
     printf '  %sunlock%s [<project>|*] [<worktree>] remove the lock\n\n' "$g" "$r"
 
     printf '%sTools%s\n' "$b" "$r"
-    printf '  %sinstall%s [--shell-only] [<dir>]    install gitree globally + wt() shell function\n' "$g" "$r"
+    printf '  %sinstall%s [--shell-only|--no-shell] [<dir>]  install gitree; --no-shell skips rc patching\n' "$g" "$r"
     printf '  %scompletion%s <bash|zsh>             print shell completion script\n' "$g" "$r"
     printf '  %srepair-head%s                       reset bare HEAD to remote default branch\n' "$g" "$r"
     printf '  %sbranch-context init%s [<project>|*] scaffold .gitree-context/ for existing repos\n\n' "$g" "$r"
