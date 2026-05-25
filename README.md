@@ -175,6 +175,9 @@ Locking is per-worktree. Lock `main` to protect your default surface while freel
 - `gitree goto` / `gitree-goto()` shell fn — navigate to any project worktree from anywhere
 - `gitree list [project]` — scoped listing, auto-detected from cwd
 - HEAD drift detection in `gitree list` output with repair hint
+- `.gitree-context/` branch context scaffolding — per-branch `README.md`, `AGENTS.md`, `TODO.md`, `ROADMAP.md` created on `gitree new`/`wt`, symlinked as `.branch-context/` inside each worktree
+- `gitree branch-context init [<project>|*]` — retrofit existing repos with branch context
+- `AGENTS.md` + `CLAUDE.md` auto-generated at workspace root on `gitree init` / `gitree add`; `.gitree-context/AGENTS.md` stub for workspace-specific agent context
 - Homebrew tap: `pixelitemedia/tap`
 - npm package: `@pixelitemedia/gitree`
 

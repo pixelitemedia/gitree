@@ -2,7 +2,6 @@
 
 ## Near-term
 
-- **`.gitree-context/` branch context scaffolding** (spec in CONTEXT-SPEC.md) — when a worktree is created, scaffold `.branch-context/` with `README.md`, `AGENTS.md`, `TODO.md`, `ROADMAP.md` so agents have per-branch context immediately. Symlinked from `.gitree-context/<project>/<branch>/` so context is workspace-global, not inside the repo.
 - **Remote agent / shared hosting install** — `npm install -g @pixelitemedia/gitree` on a remote server; agents use `gitree wt <plugin> <branch>` to get isolated worktrees for testing. The `--no-shell` flag and headless-safe install path are prerequisites.
 - **wp-gitree WordPress plugin** — WP plugin that wraps gitree concepts: knows about the active worktree, handles `plugins_url()` mapping, exposes gitree workspace state to WP admin. Companion to `symlink-plugin-paths.php` mu-plugin.
 

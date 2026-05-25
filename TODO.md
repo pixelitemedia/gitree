@@ -21,6 +21,5 @@
 
 ## Chores
 
-- [ ] Update CLAUDE.gitree.md to add `restore`, `drop`, `repair-head`, `goto` (partially done — `switch -l` is there, other gaps remain)
 - [ ] Tag v1.1.0 after npm + polish pass
 - [ ] Update Homebrew formula SHA after new tag
