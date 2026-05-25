@@ -462,14 +462,20 @@ workspace root. Everything portable lives under `.gitree-context/`:
 <workspace>/
 ├── AGENTS.md   .gitree
 └── .gitree-context/
-    ├── AGENTS.md   README.md   TODO.md   ROADMAP.md   ← workspace state
-    └── <project>/<branch>/    or   <branch>/          ← per-branch (multi vs mono-repo)
+    ├── AGENTS.md                              ← workspace operational context
+    ├── README.md   TODO.md   ROADMAP.md       ← workspace-wide (optional)
+    └── <project>/
+        ├── README.md   TODO.md   ROADMAP.md   ← project-level (optional)
+        └── <branch>/                          ← per-branch (symlinked from worktrees)
 ```
 
-**Multi-repo:** branches go under `<project>/<branch>/`.
-**Mono-repo (workspace = project):** no nested `<project>/` layer — branches go directly
-at `.gitree-context/<branch>/`, and the workspace-level README/TODO/ROADMAP ARE the
-project's README/TODO/ROADMAP.
+Branches always live under `<project>/` — same for mono and multi-repo — so a mono-repo
+workspace can be converted to multi-repo later without restructuring.
+
+**Mono-repo loophole:** when the workspace IS the project, the project-level
+README/TODO/ROADMAP/AGENTS can live at `.gitree-context/` root instead of under
+`<project>/` (since workspace = project anyway). Saves AI agents an extra traversal.
+The branch tree under `<project>/<branch>/` stays put.
 
 Export model: rsync `.gitree` + `.gitree-context/` to another machine, run `gitree restore`,
 done. `AGENTS.md` at workspace root is regenerated; no need to sync it.
@@ -626,15 +632,15 @@ _list_project_worktrees() {
 }
 
 # Where this project's branch contexts live under .gitree-context/.
-# Multi-repo: .gitree-context/<project>/  ←  branches as subdirs
-# Mono-repo:  .gitree-context/            ←  branches as subdirs alongside workspace files
+# Always .gitree-context/<project>/ — same for mono and multi-repo so that a
+# mono-repo workspace can be converted to multi-repo later without restructuring
+# the branch context tree. Only the project-level .md files (README/TODO/ROADMAP)
+# get the mono-repo "loophole" of living at .gitree-context/ root, since in a
+# mono-repo the workspace IS the project — that's a user-managed choice, not
+# something gitree creates.
 _project_context_root() {
     local project="$1"
-    if [[ -d "${GITREE_WORKSPACE:-}/.bare" ]]; then
-        printf '%s' "$GITREE_WORKSPACE/.gitree-context"
-    else
-        printf '%s' "$GITREE_WORKSPACE/.gitree-context/$project"
-    fi
+    printf '%s' "$GITREE_WORKSPACE/.gitree-context/$project"
 }
 
 _ignore_branch_context() {
@@ -1222,8 +1228,6 @@ PY
             for ctx_dir in "$ctx_root"/*/; do
                 [[ -d "$ctx_dir" ]] || continue
                 local ctx_dirname; ctx_dirname=$(basename "$ctx_dir")
-                # Mono-repo: ctx_root IS .gitree-context/, so subdirs include .archived.
-                [[ "$ctx_dirname" == ".archived" ]] && continue
                 local wt_path="$pdir/.worktrees/$ctx_dirname"
                 local link="$wt_path/.branch-context"
                 if [[ -d "$wt_path" && ! -L "$link" ]]; then

@@ -132,35 +132,29 @@ Branch names with slashes map to dir names with `--` (`feature/foo` → `.worktr
 
 ### Workspace
 
-A gitree workspace is the directory containing `.gitree`. Two flavours:
-
-**Multi-repo** — one or more projects as siblings:
+A gitree workspace is the directory containing `.gitree`. Only `AGENTS.md` (the gitree-managed entry point) and `.gitree` live at the workspace root — everything else portable lives under `.gitree-context/`:
 
 ```
 <workspace>/
-├── .gitree                  ← config + project manifest
-├── AGENTS.md                ← workspace entry point (gitree baseline)
-├── CLAUDE.md → AGENTS.md    ← optional Claude entry point
-├── .gitree-context/         ← all portable workspace state
-│   ├── AGENTS.md            ← workspace operational context (overrides baseline)
-│   ├── README.md  TODO.md  ROADMAP.md   ← (optional) workspace-wide
-│   └── <project>/<branch>/  ← per-branch context (symlinked from worktrees)
-└── <project>/  <project>/   ← the actual project dirs
+├── .gitree                                    ← config + project manifest
+├── AGENTS.md                                  ← workspace entry point (gitree baseline)
+├── CLAUDE.md → AGENTS.md                      ← optional Claude entry point
+└── .gitree-context/                           ← all portable workspace state
+    ├── AGENTS.md                              ← workspace operational context (overrides baseline)
+    ├── README.md   TODO.md   ROADMAP.md       ← workspace-wide (optional)
+    └── <project>/
+        ├── README.md   TODO.md   ROADMAP.md   ← project-level (optional)
+        └── <branch>/                          ← per-branch context (symlinked from worktrees)
 ```
 
-**Mono-repo** — workspace IS the project, no subdirectory layer:
+The two flavours of workspace differ only in where the project repos sit on disk:
 
-```
-<workspace>/
-├── .gitree
-├── AGENTS.md   CLAUDE.md→
-├── .gitree-context/
-│   ├── AGENTS.md   README.md   TODO.md   ROADMAP.md
-│   └── <branch>/            ← per-branch context (no nested <project>/ layer)
-└── .bare/   main/   .worktrees/<branch>/
-```
+- **Multi-repo** — projects as sibling directories: `<workspace>/<project>/<{.bare,main,.worktrees}>`. `gitree add <repo>` creates this.
+- **Mono-repo** — workspace IS the project: `<workspace>/<{.bare,main,.worktrees}>` directly. `gitree add . <repo>` creates this.
 
-`gitree add . <repo>` creates a mono-repo layout; `gitree add <repo>` puts the repo in a subdirectory (multi-repo).
+Branches always live under `.gitree-context/<project>/<branch>/` — same in both flavours — so a mono-repo workspace can be converted to multi-repo later without restructuring the context tree.
+
+**Mono-repo loophole:** when the workspace IS the project, the project-level README/TODO/ROADMAP/AGENTS can live at `.gitree-context/` root instead of under `<project>/` (workspace = project, so no need to duplicate). Saves AI agents an extra directory traversal. The branch tree at `<project>/<branch>/` stays where it is.
 
 ### Context files
 
@@ -173,7 +167,7 @@ gitree maintains a convention for four file types at each level (workspace, proj
 
 Each piece of information lives in exactly one place. Higher-level files describe structure; lower-level files describe specifics. They don't duplicate.
 
-Only `AGENTS.md` (entry point) and `.gitree` live at the workspace root — everything else portable lives under `.gitree-context/`. `bin/AGENTS.md` ships with gitree as the full reference for this convention; the condensed version is what `gitree init` writes to `<workspace>/AGENTS.md`.
+`bin/AGENTS.md` ships with gitree as the full reference for this convention; a condensed version is what `gitree init` writes to `<workspace>/AGENTS.md`.
 
 ### Export model
 
