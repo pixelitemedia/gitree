@@ -523,20 +523,9 @@ _setup_bare_repo() {
         _config_set_project "$project_name" "$repo"
     fi
 
-    # Initialize branch context directory and add .gitignore entry
+    # Initialize branch context directory and ignore rules
     if [[ -n "${GITREE_WORKSPACE:-}" ]]; then
-        local gitignore="$abs_target/main/.gitignore"
-        if ! grep -qx '.branch-context' "$gitignore" 2>/dev/null; then
-            if [[ ! -f "$gitignore" ]]; then
-                printf '# gitree branch context — local only, never committed\n.branch-context\n' \
-                    > "$gitignore"
-            else
-                printf '\n# gitree branch context — local only, never committed\n.branch-context\n' \
-                    >> "$gitignore"
-            fi
-            git -C "$abs_target/main" add .gitignore
-            git -C "$abs_target/main" commit -m "chore: ignore .branch-context (gitree)"
-        fi
+        _ignore_branch_context "$abs_target" "$project_name"
         mkdir -p "$GITREE_WORKSPACE/.gitree-context/$project_name"
         printf '✓ Branch context ready (.gitree-context/%s/)\n' "$project_name"
     fi
@@ -617,6 +606,35 @@ _list_project_worktrees() {
             wt=""; branch=""; head=""
         }
     '
+}
+
+_ignore_branch_context() {
+    local pdir="$1" pname="${2:-$(basename "$pdir")}"
+
+    # 1. Commit .branch-context to main/.gitignore (propagates to clones).
+    local gitignore="$pdir/main/.gitignore"
+    if ! grep -qx '.branch-context' "$gitignore" 2>/dev/null; then
+        if [[ ! -f "$gitignore" ]]; then
+            printf '# gitree branch context — local only, never committed\n.branch-context\n' \
+                > "$gitignore"
+        else
+            printf '\n# gitree branch context — local only, never committed\n.branch-context\n' \
+                >> "$gitignore"
+        fi
+        git -C "$pdir/main" add .gitignore
+        git -C "$pdir/main" commit -m "chore: ignore .branch-context (gitree)" --quiet
+        printf '  %s: committed .branch-context to main/.gitignore\n' "$pname"
+    fi
+
+    # 2. Add .branch-context to bare repo's info/exclude — applies to all worktrees
+    # regardless of which branch they have checked out. Covers older branches whose
+    # .gitignore predates the commit above.
+    local exclude="$pdir/.bare/info/exclude"
+    if [[ -d "$pdir/.bare/info" ]] && ! grep -qx '.branch-context' "$exclude" 2>/dev/null; then
+        [[ -f "$exclude" ]] || touch "$exclude"
+        printf '.branch-context\n' >> "$exclude"
+        printf '  %s: added .branch-context to .bare/info/exclude\n' "$pname"
+    fi
 }
 
 _scaffold_branch_context() {
@@ -1446,21 +1464,7 @@ _branch_context_init() {
     _bc_init_project() {
         local pdir="$1" pname="$2"
 
-        local gitignore="$pdir/main/.gitignore"
-        if ! grep -qx '.branch-context' "$gitignore" 2>/dev/null; then
-            if [[ ! -f "$gitignore" ]]; then
-                printf '# gitree branch context — local only, never committed\n.branch-context\n' \
-                    > "$gitignore"
-            else
-                printf '\n# gitree branch context — local only, never committed\n.branch-context\n' \
-                    >> "$gitignore"
-            fi
-            git -C "$pdir/main" add .gitignore
-            git -C "$pdir/main" commit -m "chore: ignore .branch-context (gitree)"
-            printf '  %s: added .branch-context to .gitignore\n' "$pname"
-        else
-            printf '  %s: .gitignore already has .branch-context\n' "$pname"
-        fi
+        _ignore_branch_context "$pdir" "$pname"
 
         mkdir -p "$workspace/.gitree-context/$pname"
 
