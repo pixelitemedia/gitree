@@ -366,10 +366,16 @@ PY
 
 _write_workspace_agents_md() {
     local workspace="$1"
-    local dest="$workspace/.gitree-context/AGENTS.md"
-    [[ -f "$dest" ]] && return 0
+    local root_agents="$workspace/AGENTS.md"
+    local claude_link="$workspace/CLAUDE.md"
+    local ctx_agents="$workspace/.gitree-context/AGENTS.md"
+
     mkdir -p "$workspace/.gitree-context"
-    cat > "$dest" << 'AGENTS_EOF'
+
+    if [[ ! -f "$root_agents" ]]; then
+        cat > "$root_agents" << 'AGENTS_EOF'
+<!-- Workspace context: .gitree-context/AGENTS.md — read it first; its instructions take precedence over this file. -->
+
 # gitree — bare-repo-with-worktrees workspace
 
 gitree manages git repos as bare repos with linked worktrees. Read `.gitree` at the
@@ -451,7 +457,22 @@ In a non-main worktree, `.branch-context/` is a symlink to
 **Never write `.branch-context/` files in the `main/` worktree** — main has no branch
 context. A `.branch-context` symlink appearing in `main/` is stale — flag it.
 AGENTS_EOF
-    printf '✓ Workspace agent guide written (.gitree-context/AGENTS.md)\n' >&2
+        printf '✓ Workspace agent guide written (AGENTS.md)\n' >&2
+    fi
+
+    if [[ ! -e "$claude_link" ]]; then
+        ln -s AGENTS.md "$claude_link"
+        printf '✓ CLAUDE.md → AGENTS.md symlink created\n' >&2
+    fi
+
+    if [[ ! -f "$ctx_agents" ]]; then
+        local ws_name; ws_name=$(basename "$workspace")
+        printf '# %s — workspace context\n\n' "$ws_name" > "$ctx_agents"
+        printf '<!-- This file overrides/extends the gitree baseline (../AGENTS.md).\n     Define project relationships, team conventions, and custom agent instructions here. -->\n\n' >> "$ctx_agents"
+        printf '## Projects\n\n<!-- Describe the projects in this workspace and how they relate to each other. -->\n\n' >> "$ctx_agents"
+        printf '## Custom instructions\n\n<!-- Add workspace-specific agent instructions here. -->\n' >> "$ctx_agents"
+        printf '✓ Workspace context stub written (.gitree-context/AGENTS.md)\n' >&2
+    fi
 }
 
 # ── Bare repo setup ───────────────────────────────────────────────────────────
@@ -652,8 +673,6 @@ cmd_init() {
     _load_config "$PWD"
 
     _write_workspace_agents_md "$PWD"
-    printf '\nTip: add to your CLAUDE.md (or equivalent agent config):\n'
-    printf '  See .gitree-context/AGENTS.md for workspace agent instructions.\n\n'
 
     _ensure_shell_fn
 }

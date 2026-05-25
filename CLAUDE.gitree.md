@@ -1,7 +1,9 @@
 # gitree — bare-repo-with-worktrees workflow
 
 > This file is the maintained source for the workspace agent guide. A condensed version
-> is embedded in `bin/gitree` and written to `.gitree-context/AGENTS.md` on `gitree init`.
+> is embedded in `bin/gitree` and written to `AGENTS.md` at the workspace root on `gitree init`.
+> `CLAUDE.md` is created as a symlink to `AGENTS.md`. `.gitree-context/AGENTS.md` holds the
+> customizable workspace stub that takes precedence over the baseline.
 
 gitree manages git repos as bare repos with linked worktrees. Read `.gitree` at the workspace root for the authoritative project list (`projects` key) and runtime switch paths (`switch.*` keys).
 
