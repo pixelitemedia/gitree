@@ -626,7 +626,7 @@ cmd_new() {
     local path
     path=$(_resolve_worktree "$GITREE_BARE_DIR" "$GITREE_PLUGIN_DIR" "$branch")
 
-    _scaffold_branch_context "$GITREE_PLUGIN_NAME" "$branch" "$path"
+    [[ "$branch" != "main" ]] && _scaffold_branch_context "$GITREE_PLUGIN_NAME" "$branch" "$path"
     _ensure_shell_fn "$path"
     printf '%s\n' "$path"
 }
@@ -1298,18 +1298,6 @@ _gitree
 ZSH
 }
 
-# ── Bootstrap ─────────────────────────────────────────────────────────────────
-
-GITREE_WORKSPACE=""
-SWITCH_PATH=""
-GITREE_CONFIG_FILE=""
-GITREE_CONFIG_JSON=0
-
-if _ws=$(_find_workspace_root 2>/dev/null); then
-    GITREE_WORKSPACE="$_ws"
-    _load_config "$_ws"
-fi
-
 cmd_branch_context() {
     local action="${1:-}"
     case "$action" in
@@ -1389,6 +1377,18 @@ _branch_context_init() {
         _bc_init_project "$GITREE_PLUGIN_DIR" "$GITREE_PLUGIN_NAME"
     fi
 }
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+GITREE_WORKSPACE=""
+SWITCH_PATH=""
+GITREE_CONFIG_FILE=""
+GITREE_CONFIG_JSON=0
+
+if _ws=$(_find_workspace_root 2>/dev/null); then
+    GITREE_WORKSPACE="$_ws"
+    _load_config "$_ws"
+fi
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 
