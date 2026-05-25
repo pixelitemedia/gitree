@@ -219,6 +219,7 @@ Locking is per-worktree. Lock `main` to protect your default surface while freel
 
 ## Achievements
 
+- v1.1.0 — `gitree switch` (no args) prints current state; `gitree drop` cleans stale switch symlinks; `gitree list` shows relative paths; `gitree remove` offers remote branch delete; tab completion includes project names; `gitree install --no-shell` for headless environments
 - v1.0.0 — initial release: bare-repo layout, worktree create/remove/lock, switch, pull, audit, install, shell completion
 - JSON `.gitree` config with named switch locations (`switch.*`) and project manifest (`projects`)
 - `gitree switch -l <location>` — multi-location switching (e.g. default / wpml / wpwc)
