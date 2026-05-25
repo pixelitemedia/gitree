@@ -378,57 +378,11 @@ _write_workspace_agents_md() {
 
 # gitree workspace
 
-## Context file roles and anti-drift rules
-
-Each piece of information lives in exactly one place at the right level. Higher-level
-files define structure and relationships — they do not summarise or echo lower-level
-files. When something changes, update it in one place only.
-
-### AGENTS.md
-Operational instructions for working in a project: conventions, tooling constraints,
-how-tos specific to this codebase. Not a task list, not a README summary.
-
-- **Update when:** conventions change, new constraints are discovered, tooling changes.
-- **Don't:** duplicate README context, list tasks, describe roadmap plans, repeat gitree
-  basics already covered here.
-
-### README.md
-Persistent context about what a project is — architecture, purpose, relationships to
-other repos. Written for both humans and agents starting cold.
-
-- **Update when:** architecture changes, scope changes, key relationships shift.
-- **Don't:** include task-level detail, branch-specific work, or ephemeral state.
-
-### TODO.md
-At the workspace or project root: only cross-repo organisation tasks, or triage items
-with no branch home yet. Per-branch work lives in `.branch-context/TODO.md`.
-
-- **Update when:** a genuine workspace-level task exists with no natural branch.
-- **Don't:** copy branch TODOs here, add implementation detail, let it grow stale.
-
-### ROADMAP.md
-High-level direction relevant to multiple repos — phases, milestone groupings, strategic
-pivots. Create at the workspace root only if direction spans multiple projects; individual
-feature planning belongs in branches.
-
-- **Update when:** multi-repo strategy changes.
-- **Don't:** duplicate per-feature detail that belongs in a branch; create this file if
-  it would only describe a single repo's work.
-
-### Mono-repo workspaces
-
-When the workspace contains a single project, skip the workspace-root level for
-README/TODO/ROADMAP — place them at `.gitree-context/<project>/` alongside the branch
-subdirectories. The workspace `AGENTS.md` stays at root as the entry point, but project
-context lives one level deeper, matching the branch context structure directly.
-
----
-
-## gitree workspace layout
-
 gitree manages git repos as bare repos with linked worktrees. Read `.gitree` at the
 workspace root for the authoritative project list (`projects` key) and runtime switch
 paths (`switch.*` keys).
+
+## Layout
 
 ```
 <project>/
@@ -444,7 +398,7 @@ paths (`switch.*` keys).
   `git worktree list`. `git status` errors with "must be run in a work tree" — expected.
 - **Default working surface is `main/`** unless explicitly directed elsewhere.
 
-### Key commands
+## Key commands
 
 ```bash
 gitree list [<project>]                          # list worktrees and load state
@@ -460,7 +414,7 @@ gitree restore                                   # clone all projects in .gitree
 Shell functions (`gitree install`): `wt <branch>` — create/enter worktree.
 Branch `/` → dir `--`: `feature/foo` → `.worktrees/feature--foo/`. Pass real branch names.
 
-### Multi-session safety
+## Multi-session safety
 
 - **Stay in the worktree you were opened in.** Don't `cd` into a sibling without explicit
   instruction.
@@ -469,14 +423,14 @@ Branch `/` → dir `--`: `feature/foo` → `.worktrees/feature--foo/`. Pass real
   branch already checked out elsewhere.
 - **Don't `git worktree remove`** without confirming nobody else is working in it.
 
-### Branch context
+## Branch context
 
 `.gitree-context/` at the workspace root holds per-branch context for all projects.
 Never committed — synced between machines via rsync alongside `.gitree`.
 
 In a non-main worktree, `.branch-context/` is a symlink to
 `.gitree-context/<project>/<branch>/` and contains: `README.md`, `AGENTS.md`, `TODO.md`,
-`ROADMAP.md` (see file role definitions above for how to maintain each).
+`ROADMAP.md`.
 
 **When starting work in a non-main worktree:**
 1. Read `.branch-context/README.md` then `.branch-context/AGENTS.md`
@@ -485,6 +439,24 @@ In a non-main worktree, `.branch-context/` is a symlink to
 
 **Never write `.branch-context/` files in `main/`** — main has no branch context.
 A `.branch-context` symlink in `main/` is stale — flag it.
+
+### Context file roles and anti-drift rules
+
+Each piece of information lives in exactly one place at the right level. Higher-level
+files define structure and relationships — they do not summarise or echo lower-level
+files. When something changes, update it in one place only.
+
+- **AGENTS.md** — operational instructions: conventions, tooling constraints, how-tos.
+  Not a task list, not a README summary. Don't duplicate README context or repeat gitree
+  basics already covered here.
+- **README.md** — persistent context: architecture, purpose, relationships. Written for
+  humans and agents starting cold. No task-level detail or ephemeral state.
+- **TODO.md** — workspace root: cross-repo tasks with no branch home only. Per-branch
+  work lives in `.branch-context/TODO.md`. Don't copy branch TODOs here.
+- **ROADMAP.md** — multi-repo strategy only. Don't create at workspace root if it would
+  only describe a single repo; individual feature planning belongs in branches.
+- **Mono-repo:** place README/TODO/ROADMAP at `.gitree-context/<project>/` (not workspace
+  root) — skip the extra level, go straight to branch subdirectories.
 AGENTS_EOF
         printf '✓ Workspace agent guide written (AGENTS.md)\n' >&2
     fi
