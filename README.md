@@ -103,6 +103,24 @@ Legacy key=value format (`SWITCH_PATH=...`) is still supported for single-locati
 
 `gitree add` and `gitree drop` keep the manifest in sync automatically.
 
+### Per-project switch overrides
+
+A switch location can be an object with a `default` fallback and per-project paths:
+
+```json
+{
+  "switch": {
+    "default": {
+      "default": "~/path/to/plugins",
+      "my-mu-plugin": "~/path/to/mu-plugins"
+    },
+    "staging": "~/staging/plugins"
+  }
+}
+```
+
+`gitree switch my-mu-plugin` lands in `~/path/to/mu-plugins/my-mu-plugin`; everything else lands in `~/path/to/plugins/<project>`. The `staging` location stays a plain string — both forms coexist.
+
 ### Multiple switch locations
 
 ```sh

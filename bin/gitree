@@ -99,15 +99,26 @@ PY
 # Works with both JSON and legacy formats.
 _get_switch_path() {
     local location="${1:-default}"
+    local project="${2:-}"
     if [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]]; then
         local p
-        p=$(python3 - "$GITREE_CONFIG_FILE" "$location" <<'PY'
+        p=$(python3 - "$GITREE_CONFIG_FILE" "$location" "$project" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-loc = sys.argv[2]
+loc, project = sys.argv[2], sys.argv[3]
 sw = d.get("switch", {})
-if isinstance(sw, dict):  print(sw.get(loc, ""))
-elif isinstance(sw, str) and loc == "default": print(sw)
+if isinstance(sw, dict):
+    entry = sw.get(loc, "")
+    if isinstance(entry, dict):
+        # Per-project map: project override, else "default" fallback
+        path = entry.get(project, "") if project else ""
+        if not path:
+            path = entry.get("default", "")
+        print(path)
+    elif isinstance(entry, str):
+        print(entry)
+elif isinstance(sw, str) and loc == "default":
+    print(sw)
 PY
         )
         p="${p/#\~/$HOME}"
@@ -121,6 +132,7 @@ PY
 }
 
 # List all named switch locations as "name<TAB>path" lines.
+# For per-project map entries, returns the "default" key (the bare location path).
 _list_switch_locations() {
     if [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]]; then
         python3 - "$GITREE_CONFIG_FILE" <<'PY'
@@ -129,13 +141,34 @@ d = json.load(open(sys.argv[1]))
 sw = d.get("switch", {})
 if isinstance(sw, dict):
     for k, v in sw.items():
-        print(f"{k}\t{v}")
+        if isinstance(v, dict):
+            print(f"{k}\t{v.get('default', '')}")
+        elif isinstance(v, str):
+            print(f"{k}\t{v}")
 elif isinstance(sw, str):
     print(f"default\t{sw}")
 PY
     elif [[ -n "${SWITCH_PATH:-}" ]]; then
         printf 'default\t%s\n' "$SWITCH_PATH"
     fi
+}
+
+# List per-project overrides for a switch location as "project<TAB>path" lines.
+# Empty output when the location is a plain string or has no overrides.
+_list_switch_overrides() {
+    local location="$1"
+    [[ "${GITREE_CONFIG_JSON:-0}" == "1" && -f "${GITREE_CONFIG_FILE:-}" ]] || return 0
+    python3 - "$GITREE_CONFIG_FILE" "$location" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+loc = sys.argv[2]
+entry = d.get("switch", {}).get(loc, "")
+if isinstance(entry, dict):
+    for k, v in entry.items():
+        if k == "default":
+            continue
+        print(f"{k}\t{v}")
+PY
 }
 
 # Resolve plugin name + dirs from an optional name hint, falling back to cwd.
@@ -943,13 +976,16 @@ cmd_list() {
     # Runtime load state — one block per switch location
     local any_locations=0
     while IFS=$'\t' read -r loc_name loc_path; do
-        [[ -z "$loc_path" ]] && continue
         loc_path="${loc_path/#\~/$HOME}"
-        [[ -d "$loc_path" ]] || continue
-        any_locations=1
 
         if [[ -n "$single_project" ]]; then
-            local sym="$loc_path/$single_project"
+            # Single project: resolve per-project path (supports override map)
+            local resolved; resolved=$(_get_switch_path "$loc_name" "$single_project")
+            [[ -z "$resolved" ]] && continue
+            resolved="${resolved/#\~/$HOME}"
+            [[ -d "$resolved" ]] || continue
+            any_locations=1
+            local sym="$resolved/$single_project"
             if [[ -L "$sym" ]]; then
                 local target; target=$(readlink "$sym")
                 local rel="${target##*"$single_project"/}"
@@ -960,6 +996,8 @@ cmd_list() {
                 fi
             fi
         else
+            [[ -z "$loc_path" || ! -d "$loc_path" ]] && continue
+            any_locations=1
             if [[ "$loc_name" == "default" ]]; then
                 printf '\nRuntime load state (%s):\n' "$loc_path"
             else
@@ -976,6 +1014,18 @@ cmd_list() {
                 printf '  %-40s → %s\n' "$name" "$rel"
                 printed=1
             done
+            # Per-project overrides for this location (not in the default dir)
+            while IFS=$'\t' read -r ov_project ov_path; do
+                [[ -z "$ov_path" ]] && continue
+                ov_path="${ov_path/#\~/$HOME}"
+                local ov_sym="$ov_path/$ov_project"
+                [[ -L "$ov_sym" ]] || continue
+                local ov_target; ov_target=$(readlink "$ov_sym")
+                [[ -n "$workspace" && "$ov_target" == "$workspace"/* ]] || continue
+                local ov_rel="${ov_target##*"$ov_project"/}"
+                printf '  %-40s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_path"
+                printed=1
+            done < <(_list_switch_overrides "$loc_name")
             [[ $printed -eq 0 ]] && printf '  (none)\n'
         fi
     done < <(_list_switch_locations)
@@ -1158,11 +1208,12 @@ cmd_drop() {
     _config_remove_project "$name"
     printf '✓ Dropped %s\n' "$name"
 
-    # Clean up stale switch symlinks
-    while IFS=$'\t' read -r loc_name loc_path; do
-        [[ -z "$loc_path" ]] && continue
-        loc_path="${loc_path/#\~/$HOME}"
-        local sym="$loc_path/$name"
+    # Clean up stale switch symlinks (resolves per-project overrides)
+    while IFS=$'\t' read -r loc_name _; do
+        local resolved; resolved=$(_get_switch_path "$loc_name" "$name")
+        [[ -z "$resolved" ]] && continue
+        resolved="${resolved/#\~/$HOME}"
+        local sym="$resolved/$name"
         if [[ -L "$sym" ]]; then
             rm -f "$sym"
             if [[ "$loc_name" == "default" ]]; then
@@ -1210,6 +1261,18 @@ cmd_switch() {
                 printf '  %-36s → %s\n' "$name" "$rel"
                 printed=1
             done
+            # Per-project overrides for this location
+            while IFS=$'\t' read -r ov_project ov_path; do
+                [[ -z "$ov_path" ]] && continue
+                ov_path="${ov_path/#\~/$HOME}"
+                local ov_sym="$ov_path/$ov_project"
+                [[ -L "$ov_sym" ]] || continue
+                local ov_target; ov_target=$(readlink "$ov_sym")
+                [[ -z "$workspace" || "$ov_target" == "$workspace"/* ]] || continue
+                local ov_rel="${ov_target##*"$ov_project"/}"
+                printf '  %-36s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_path"
+                printed=1
+            done < <(_list_switch_overrides "$loc_name")
             [[ $printed -eq 0 ]] && printf '  (none)\n'
         done < <(_list_switch_locations)
         if [[ $found -eq 0 ]]; then
@@ -1223,8 +1286,23 @@ cmd_switch() {
         return
     fi
 
+    local branch="" name_hint=""
+    case $# in
+        1) branch="$1" ;;
+        *) name_hint="$1"; branch="$2" ;;
+    esac
+
+    if ! _resolve_plugin "$name_hint"; then
+        printf 'Error: not inside a project directory, and no project name given\n' >&2; exit 1
+    fi
+
+    local pdir="$GITREE_PLUGIN_DIR"
+    local bare="$GITREE_BARE_DIR"
+    local name="$GITREE_PLUGIN_NAME"
+
+    # Resolve switch path now that we know the project (supports per-project overrides)
     local switch_path
-    switch_path=$(_get_switch_path "$location")
+    switch_path=$(_get_switch_path "$location" "$name")
     if [[ -z "$switch_path" ]]; then
         if [[ "$location" == "default" ]]; then
             printf 'Error: no switch location configured in .gitree\n' >&2
@@ -1247,19 +1325,6 @@ cmd_switch() {
         printf 'Created switch directory: %s\n' "$switch_path" >&2
     fi
 
-    local branch="" name_hint=""
-    case $# in
-        1) branch="$1" ;;
-        *) name_hint="$1"; branch="$2" ;;
-    esac
-
-    if ! _resolve_plugin "$name_hint"; then
-        printf 'Error: not inside a project directory, and no project name given\n' >&2; exit 1
-    fi
-
-    local pdir="$GITREE_PLUGIN_DIR"
-    local bare="$GITREE_BARE_DIR"
-    local name="$GITREE_PLUGIN_NAME"
     local sym="$switch_path/$name"
 
     if [[ -z "$branch" ]]; then
