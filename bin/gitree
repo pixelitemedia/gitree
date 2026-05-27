@@ -1619,28 +1619,44 @@ cmd_sync() {
         done < <(git -C "$bare" worktree list --porcelain && printf '\n')
     }
 
+    # Context-detection cascade:
+    #   explicit --repo  → workspace level (all repos)
+    #   explicit --all   → project level; escalate to workspace if not in a project
+    #   no flag, in worktree     → single worktree
+    #   no flag, in project dir  → escalate to --all (all worktrees of this project)
+    #   no flag, at workspace root → escalate to --repo (all repos)
+    local cwd_wt workspace="${GITREE_WORKSPACE:-}"
+    cwd_wt=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)
+
+    if [[ "$repo_level" == false && "$all" == false && -z "$cwd_wt" ]]; then
+        # Not in a worktree — escalate based on context
+        if _resolve_plugin "" 2>/dev/null; then
+            all=true        # inside a project container → sync all its worktrees
+        else
+            repo_level=true # at workspace root → sync everything
+        fi
+    fi
+
+    if [[ "$all" == true && -z "$cwd_wt" ]] && ! _resolve_plugin "" 2>/dev/null; then
+        # --all but not in a project → escalate to --repo
+        repo_level=true; all=false
+    fi
+
     printf '\n'
 
     if [[ "$repo_level" == true ]]; then
-        local workspace="${GITREE_WORKSPACE:-}"
         [[ -z "$workspace" ]] && { printf 'Error: no .gitree workspace found\n' >&2; exit 1; }
         for pdir in "$workspace"/*/; do
             [[ -d "${pdir}.bare" ]] || continue
             _sync_plugin "${pdir%/}"
         done
     elif [[ "$all" == true ]]; then
-        if ! _resolve_plugin ""; then
-            printf 'Error: not inside a project directory\n' >&2; exit 1
-        fi
+        _resolve_plugin "" || { printf 'Error: not inside a project directory\n' >&2; exit 1; }
         _sync_plugin "$GITREE_PLUGIN_DIR"
     else
-        # Single worktree: wherever we're standing
-        local cwd_wt
-        cwd_wt=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)
+        # Single worktree
         [[ -z "$cwd_wt" ]] && { printf 'Error: not inside a worktree\n' >&2; exit 1; }
-        if ! _resolve_plugin ""; then
-            printf 'Error: not inside a project directory\n' >&2; exit 1
-        fi
+        _resolve_plugin "" || { printf 'Error: not inside a project directory\n' >&2; exit 1; }
         _sync_plugin "$GITREE_PLUGIN_DIR" "$cwd_wt"
     fi
 
