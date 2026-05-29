@@ -10,8 +10,7 @@ Built for Marcus's WordPress plugin workflow: multiple plugins, multiple WP inst
 
 - **Language**: Bash (self-contained, no runtime deps beyond bash + python3 + git)
 - **python3**: used for JSON `.gitree` config parsing only
-- **Distribution**: Homebrew tap (`pixelitemedia/tap`) + npm (`@pixelitemedia/gitree`) + manual curl
-- **Tap repo**: `~/Code/gitree-tap/` → `github.com/pixelitemedia/homebrew-tap`
+- **Distribution**: npm (`@pixelitemedia/gitree`) + manual curl
 
 ## Canonical source of truth
 
@@ -72,11 +71,6 @@ gitree list
 gitree switch -l wpml events-manager some-branch
 gitree repair-head
 
-# Release flow
-cd ~/Code/gitree-tap
-# update sha256 in Formula/gitree.rb after tagging
-
-# npm publish
-cd ~/Code/gitree/main
-npm publish --access public
+# Release flow — push a tag and GitHub Actions publishes to npm automatically
+git tag v1.2.0 && git push origin v1.2.0
 ```
