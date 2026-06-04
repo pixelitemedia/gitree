@@ -121,6 +121,21 @@ A switch location can be an object with a `default` fallback and per-project pat
 
 `gitree switch my-mu-plugin` lands in `~/path/to/mu-plugins/my-mu-plugin`; everything else lands in `~/path/to/plugins/<project>`. The `staging` location stays a plain string — both forms coexist.
 
+#### The `/.` convention — directory *is* the symlink
+
+Normally the override path is a *container* and gitree creates a symlink named after the project inside it. End the path with `/.` to make the location directory itself the symlink instead:
+
+```json
+"switch": {
+  "default": {
+    "default": "~/wp-content/plugins",
+    "events-manager-seats": "~/site/account/seats/."
+  }
+}
+```
+
+`gitree switch events-manager-seats` symlinks `~/site/account/seats` → the worktree directly (not `~/site/account/seats/events-manager-seats`). gitree auto-creates the immediate parent (`account/`) if missing, errors if that parent's own parent is absent, and refuses to replace a real directory sitting at the symlink location.
+
 ### Multiple switch locations
 
 ```sh
@@ -247,7 +262,7 @@ Locking is per-worktree. Lock `main` to protect your default surface while freel
 - `gitree goto` / `gitree-goto()` shell fn — navigate to any project worktree from anywhere
 - `gitree list [project]` — scoped listing, auto-detected from cwd
 - HEAD drift detection in `gitree list` output with repair hint
-- `.gitree-context/` branch context scaffolding — per-branch `README.md`, `AGENTS.md`, `TODO.md`, `ROADMAP.md` created on `gitree new`/`wt`, symlinked as `.branch-context/` inside each worktree
+- `.gitree-context/` branch context — a per-branch dir created on `gitree new`/`wt`/`switch` and symlinked as `.branch-context/` inside each worktree. Starts empty (no stub files); agents add `README.md`/`AGENTS.md`/`TODO.md`/`ROADMAP.md` on demand
 - `gitree branch-context init [<project>|*]` — retrofit existing repos with branch context
 - `AGENTS.md` + `CLAUDE.md` auto-generated at workspace root on `gitree init` / `gitree add`; `.gitree-context/AGENTS.md` stub for workspace-specific agent context
 - Homebrew tap: `pixelitemedia/tap`

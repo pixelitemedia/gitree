@@ -172,6 +172,19 @@ if isinstance(entry, dict):
 PY
 }
 
+# Compute the actual symlink path for a project given a (tilde-expanded) switch path.
+# Normally <switch_path>/<project>. If the switch path ends in "/." the location
+# directory itself IS the symlink — the trailing "/." is stripped and no <project>
+# segment is appended (e.g. ".../account/seats/." → symlink at ".../account/seats").
+_switch_symlink_path() {
+    local sw_path="$1" project="$2"
+    if [[ "$sw_path" == */. ]]; then
+        printf '%s' "${sw_path%/.}"
+    else
+        printf '%s/%s' "$sw_path" "$project"
+    fi
+}
+
 # Resolve plugin name + dirs from an optional name hint, falling back to cwd.
 # Sets: GITREE_PLUGIN_NAME, GITREE_PLUGIN_DIR, GITREE_BARE_DIR
 _resolve_plugin() {
@@ -463,13 +476,15 @@ Branch `/` → dir `--`: `feature/foo` → `.worktrees/feature--foo/`. Pass real
 Never committed — synced between machines via rsync alongside `.gitree`.
 
 In a non-main worktree, `.branch-context/` is a symlink to
-`.gitree-context/<project>/<branch>/` and contains: `README.md`, `AGENTS.md`, `TODO.md`,
-`ROADMAP.md`.
+`.gitree-context/<project>/<branch>/`. The dir starts empty — create `README.md`,
+`AGENTS.md`, `TODO.md`, or `ROADMAP.md` only when there's real context worth recording.
+gitree never pre-creates stub files.
 
 **When starting work in a non-main worktree:**
-1. Read `.branch-context/README.md` then `.branch-context/AGENTS.md`
-2. If both are stubs, ask the user what the branch is for and populate them
-3. Keep `TODO.md` current — check off completed items, add new ones as they arise
+1. Read whatever exists in `.branch-context/` (it may be empty)
+2. If empty, ask the user what the branch is for — create `README.md`/`AGENTS.md` only
+   if the answer is worth persisting
+3. Keep `TODO.md` current if present — check off completed items, add new ones
 
 **Never write `.branch-context/` files in `main/`** — main has no branch context.
 A `.branch-context` symlink in `main/` is stale — flag it.
@@ -720,32 +735,17 @@ _scaffold_branch_context() {
 
     mkdir -p "$context_dir"
 
-    local today; today=$(date +%F)
-
-    [[ -f "$context_dir/README.md" ]] || \
-        printf '# %s\n\n<!-- What is this branch for? -->\n' \
-            "$branch" > "$context_dir/README.md"
-
-    [[ -f "$context_dir/AGENTS.md" ]] || \
-        printf '<!-- branch: %s | created: %s -->\n<!-- See README.md for branch overview -->\n' \
-            "$branch" "$today" > "$context_dir/AGENTS.md"
-
-    [[ -f "$context_dir/TODO.md" ]] || \
-        printf '# TODO — %s\n\n- [ ] \n' "$branch" > "$context_dir/TODO.md"
-
-    [[ -f "$context_dir/ROADMAP.md" ]] || touch "$context_dir/ROADMAP.md"
-
-    # Wire the .branch-context symlink only when a worktree exists for this branch.
-    # Branches without worktrees still get their context dir + stub files, ready for
-    # whenever a worktree gets created.
+    # The context dir starts empty. We deliberately do NOT write stub README/AGENTS/
+    # TODO/ROADMAP files — empty templates are noise that agents must load and skip.
+    # Files get created on demand, only when there's real context worth recording.
     if [[ -n "$wt_path" && -d "$wt_path" ]]; then
         local link="$wt_path/.branch-context"
         local rel
         rel=$(python3 -c "import os; print(os.path.relpath('$context_dir', '$wt_path'))")
         ln -sfn "$rel" "$link"
-        printf '✓ Branch context scaffolded + symlinked (%s)\n' "$branch" >&2
+        printf '✓ Branch context linked (%s)\n' "$branch" >&2
     else
-        printf '✓ Branch context scaffolded (%s — no worktree yet)\n' "$branch" >&2
+        printf '✓ Branch context dir ready (%s — no worktree yet)\n' "$branch" >&2
     fi
 }
 
@@ -980,13 +980,13 @@ cmd_list() {
         loc_path="${loc_path/#\~/$HOME}"
 
         if [[ -n "$single_project" ]]; then
-            # Single project: resolve per-project path (supports override map)
+            # Single project: resolve per-project path (supports override map + "/." convention)
             local resolved; resolved=$(_get_switch_path "$loc_name" "$single_project")
             [[ -z "$resolved" ]] && continue
             resolved="${resolved/#\~/$HOME}"
-            [[ -d "$resolved" ]] || continue
+            local sym; sym=$(_switch_symlink_path "$resolved" "$single_project")
+            [[ -d "$(dirname "$sym")" ]] || continue
             any_locations=1
-            local sym="$resolved/$single_project"
             if [[ -L "$sym" ]]; then
                 local target; target=$(readlink "$sym")
                 local rel="${target##*"$single_project"/}"
@@ -1019,12 +1019,12 @@ cmd_list() {
             while IFS=$'\t' read -r ov_project ov_path; do
                 [[ -z "$ov_path" ]] && continue
                 ov_path="${ov_path/#\~/$HOME}"
-                local ov_sym="$ov_path/$ov_project"
+                local ov_sym; ov_sym=$(_switch_symlink_path "$ov_path" "$ov_project")
                 [[ -L "$ov_sym" ]] || continue
                 local ov_target; ov_target=$(readlink "$ov_sym")
                 [[ -n "$workspace" && "$ov_target" == "$workspace"/* ]] || continue
                 local ov_rel="${ov_target##*"$ov_project"/}"
-                printf '  %-40s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_path"
+                printf '  %-40s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_sym"
                 printed=1
             done < <(_list_switch_overrides "$loc_name")
             [[ $printed -eq 0 ]] && printf '  (none)\n'
@@ -1086,14 +1086,7 @@ cmd_wt() {
     path=$(_resolve_worktree "$GITREE_BARE_DIR" "$GITREE_PLUGIN_DIR" "$branch")
 
     if [[ -n "${GITREE_WORKSPACE:-}" && "$branch" != "main" ]]; then
-        local dirname; dirname=$(_branch_to_dirname "$branch")
-        local context_dir; context_dir="$(_project_context_root "$GITREE_PLUGIN_NAME")/$dirname"
-        local link="$path/.branch-context"
-        if [[ -d "$context_dir" && ! -L "$link" ]]; then
-            local rel
-            rel=$(python3 -c "import os; print(os.path.relpath('$context_dir', '$path'))")
-            ln -sfn "$rel" "$link"
-        fi
+        _scaffold_branch_context "$GITREE_PLUGIN_NAME" "$branch" "$path"
     fi
 
     _ensure_shell_fn "$path"
@@ -1214,7 +1207,7 @@ cmd_drop() {
         local resolved; resolved=$(_get_switch_path "$loc_name" "$name")
         [[ -z "$resolved" ]] && continue
         resolved="${resolved/#\~/$HOME}"
-        local sym="$resolved/$name"
+        local sym; sym=$(_switch_symlink_path "$resolved" "$name")
         if [[ -L "$sym" ]]; then
             rm -f "$sym"
             if [[ "$loc_name" == "default" ]]; then
@@ -1266,12 +1259,12 @@ cmd_switch() {
             while IFS=$'\t' read -r ov_project ov_path; do
                 [[ -z "$ov_path" ]] && continue
                 ov_path="${ov_path/#\~/$HOME}"
-                local ov_sym="$ov_path/$ov_project"
+                local ov_sym; ov_sym=$(_switch_symlink_path "$ov_path" "$ov_project")
                 [[ -L "$ov_sym" ]] || continue
                 local ov_target; ov_target=$(readlink "$ov_sym")
                 [[ -z "$workspace" || "$ov_target" == "$workspace"/* ]] || continue
                 local ov_rel="${ov_target##*"$ov_project"/}"
-                printf '  %-36s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_path"
+                printf '  %-36s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_sym"
                 printed=1
             done < <(_list_switch_overrides "$loc_name")
             [[ $printed -eq 0 ]] && printf '  (none)\n'
@@ -1314,19 +1307,39 @@ cmd_switch() {
     fi
     switch_path="${switch_path/#\~/$HOME}"
 
-    # Auto-create the switch directory if it doesn't exist yet,
-    # but only if its parent exists (error if the root destination is missing).
-    if [[ ! -d "$switch_path" ]]; then
-        local parent; parent=$(dirname "$switch_path")
+    # "/." convention: the location dir itself is the symlink, not a container.
+    local sym self_symlink=false
+    if [[ "$switch_path" == */. ]]; then
+        self_symlink=true
+        sym="${switch_path%/.}"
+    else
+        sym="$switch_path/$name"
+    fi
+
+    # The directory that must exist: the symlink's parent in the "/." case,
+    # the switch dir itself otherwise. Auto-create it only if ITS parent exists.
+    local need_dir
+    if [[ "$self_symlink" == "true" ]]; then
+        need_dir=$(dirname "$sym")
+    else
+        need_dir="$switch_path"
+    fi
+    if [[ ! -d "$need_dir" ]]; then
+        local parent; parent=$(dirname "$need_dir")
         if [[ ! -d "$parent" ]]; then
             printf 'Error: switch location parent does not exist: %s\n' "$parent" >&2
             exit 1
         fi
-        mkdir "$switch_path"
-        printf 'Created switch directory: %s\n' "$switch_path" >&2
+        mkdir "$need_dir"
+        printf 'Created switch directory: %s\n' "$need_dir" >&2
     fi
 
-    local sym="$switch_path/$name"
+    # In the "/." case, refuse to clobber a real directory sitting where the symlink goes.
+    if [[ "$self_symlink" == "true" && -d "$sym" && ! -L "$sym" ]]; then
+        printf 'Error: %s exists as a real directory — refusing to replace it with a symlink.\n' "$sym" >&2
+        printf '       Move or remove it first, then re-run gitree switch.\n' >&2
+        exit 1
+    fi
 
     if [[ -z "$branch" ]]; then
         [[ -d "$pdir/main" ]] || { printf 'Error: main/ not found for %s\n' "$name" >&2; exit 1; }
@@ -1338,6 +1351,7 @@ cmd_switch() {
 
     local target
     target=$(_resolve_worktree "$bare" "$pdir" "$branch")
+    [[ "$branch" != "main" ]] && _scaffold_branch_context "$name" "$branch" "$target"
     ln -sfn "$target" "$sym"
     printf '✓ [%s] %s → %s (branch: %s)\n' "$location" "$name" "$target" "$branch"
 }
