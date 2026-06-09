@@ -1743,23 +1743,57 @@ _gitree_complete() {
     local cmd="${COMP_WORDS[1]}"
     local cmds="list init add new convert audit wt goto remove switch pull lock unlock install completion branch-context repair-head drop restore --help --version"
 
-    _gitree_projects() {
-        local d="$PWD" ws=""
+    _gitree_ws() {
+        local d="$PWD"
         while [[ "$d" != "/" ]]; do
-            if [[ -f "$d/.gitree" ]]; then ws="$d"; break; fi
+            [[ -f "$d/.gitree" ]] && { printf '%s' "$d"; return; }
             d=$(dirname "$d")
         done
-        [[ -z "$ws" ]] && return
+    }
+
+    _gitree_projects() {
+        local ws; ws=$(_gitree_ws) || return
         local p
         for p in "$ws"/*/; do
             [[ -d "${p%/}/.bare" ]] && printf '%s ' "$(basename "${p%/}")"
         done
     }
 
+    _gitree_locations() {
+        local ws; ws=$(_gitree_ws) || return
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open('${ws}/.gitree'))
+    sw = d.get('switch', {})
+    for k in (sw.keys() if isinstance(sw, dict) else ['default']):
+        print(k)
+except: pass
+" 2>/dev/null | tr '\n' ' '
+    }
+
+    _gitree_branches() {
+        local project="$1" ws="$2"
+        if [[ -n "$project" && -n "$ws" && -d "$ws/$project/.bare" ]]; then
+            git -C "$ws/$project/.bare" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' '
+        else
+            git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' '
+        fi
+    }
+
+    # -l flag: complete location names
+    if [[ "$cmd" == "switch" && ( "$prev" == "-l" || "$prev" == "--location" ) ]]; then
+        COMPREPLY=($(compgen -W "$(_gitree_locations 2>/dev/null)" -- "$cur"))
+        return
+    fi
+
     case "$prev" in
         gitree)
             COMPREPLY=($(compgen -W "$cmds" -- "$cur")) ;;
-        goto|wt|new|switch|lock|unlock|remove)
+        switch)
+            # First positional: offer -l flag, projects, and branches
+            COMPREPLY=($(compgen -W "-l $(_gitree_projects 2>/dev/null)$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' ')" -- "$cur")) ;;
+        goto|wt|new|lock|unlock|remove)
             local branches projects
             branches=$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' ')
             projects=$(_gitree_projects 2>/dev/null)
@@ -1772,7 +1806,24 @@ _gitree_complete() {
             COMPREPLY=($(compgen -W "init" -- "$cur")) ;;
         *)
             case "$cmd" in
-                goto|wt|new|switch|lock|unlock|remove)
+                switch)
+                    # Count positional args already typed, skipping -l <val> pairs
+                    local ws; ws=$(_gitree_ws 2>/dev/null)
+                    local i pos=0 project="" skip=0
+                    for (( i=2; i<COMP_CWORD; i++ )); do
+                        local w="${COMP_WORDS[i]}"
+                        if [[ $skip -eq 1 ]]; then skip=0; continue; fi
+                        if [[ "$w" == "-l" || "$w" == "--location" ]]; then skip=1; continue; fi
+                        [[ "$w" == -* ]] && continue
+                        (( pos++ ))
+                        [[ $pos -eq 1 ]] && project="$w"
+                    done
+                    if [[ $pos -eq 0 ]]; then
+                        COMPREPLY=($(compgen -W "-l $(_gitree_projects 2>/dev/null)$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' ')" -- "$cur"))
+                    else
+                        COMPREPLY=($(compgen -W "$(_gitree_branches "$project" "$ws" 2>/dev/null)" -- "$cur"))
+                    fi ;;
+                goto|wt|new|lock|unlock|remove)
                     local branches
                     branches=$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null | tr '\n' ' ')
                     COMPREPLY=($(compgen -W "$branches" -- "$cur")) ;;
@@ -1790,17 +1841,33 @@ _gitree() {
     local state
     _arguments '1: :->cmd' '*: :->args'
 
-    _gitree_projects() {
-        local d="$PWD" ws=""
+    _gitree_ws() {
+        local d="$PWD"
         while [[ "$d" != "/" ]]; do
-            [[ -f "$d/.gitree" ]] && { ws="$d"; break }
+            [[ -f "$d/.gitree" ]] && { print -r -- "$d"; return }
             d="${d:h}"
         done
-        [[ -z "$ws" ]] && return
+    }
+
+    _gitree_projects() {
+        local ws; ws=$(_gitree_ws) || return
         local p
         for p in "$ws"/*/; do
             [[ -d "${p%/}/.bare" ]] && print -r -- "${${p%/}:t}"
         done
+    }
+
+    _gitree_locations() {
+        local ws; ws=$(_gitree_ws) || return
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open('${ws}/.gitree'))
+    sw = d.get('switch', {})
+    for k in (sw.keys() if isinstance(sw, dict) else ['default']):
+        print(k)
+except: pass
+" 2>/dev/null
     }
 
     case $state in
@@ -1828,7 +1895,45 @@ _gitree() {
             ;;
         args)
             case ${words[2]} in
-                goto|wt|new|remove|switch|lock|unlock)
+                switch)
+                    # Check if completing the value after -l / --location
+                    if [[ "${words[CURRENT-1]}" == "-l" || "${words[CURRENT-1]}" == "--location" ]]; then
+                        local locs
+                        locs=(${(f)"$(_gitree_locations 2>/dev/null)"})
+                        _describe 'location' locs
+                    else
+                        # Count positionals already typed, skipping -l <val> pairs
+                        local ws; ws=$(_gitree_ws 2>/dev/null)
+                        local i pos=0 project="" skip=0
+                        for (( i=3; i<CURRENT; i++ )); do
+                            local w="${words[i]}"
+                            if (( skip )); then (( skip=0 )); continue; fi
+                            if [[ "$w" == "-l" || "$w" == "--location" ]]; then (( skip=1 )); continue; fi
+                            [[ "$w" == -* ]] && continue
+                            (( pos++ ))
+                            [[ $pos -eq 1 ]] && project="$w"
+                        done
+                        if (( pos == 0 )); then
+                            # No project yet: offer -l, projects, and branches
+                            local projects branches
+                            projects=(${(f)"$(_gitree_projects 2>/dev/null)"})
+                            branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)"})
+                            [[ ${#projects} -gt 0 ]] && _describe 'project' projects
+                            [[ ${#branches} -gt 0 ]] && _describe 'branch' branches
+                            _values 'flag' '-l[use named switch location]'
+                        else
+                            # Project typed: offer branches scoped to that project
+                            local branches
+                            if [[ -n "$project" && -n "$ws" && -d "$ws/$project/.bare" ]]; then
+                                branches=(${(f)"$(git -C "$ws/$project/.bare" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)"})
+                            else
+                                branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)"})
+                            fi
+                            _describe 'branch' branches
+                        fi
+                    fi
+                    ;;
+                goto|wt|new|remove|lock|unlock)
                     local branches projects
                     branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)"})
                     projects=(${(f)"$(_gitree_projects 2>/dev/null)"})
