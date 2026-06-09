@@ -1232,19 +1232,18 @@ cmd_switch() {
     # No project/branch args: print current switch state
     if [[ $# -eq 0 ]]; then
         local workspace="${GITREE_WORKSPACE:-}"
-        local found=0
+        local found=0 any_printed=0
+        local b="" r=""
+        [[ -t 1 ]] && { b=$'\033[1m'; r=$'\033[0m'; }
+        # Collect all entries first so we only print the header when there's something to show
+        local lines=()
         while IFS=$'\t' read -r loc_name loc_path; do
             [[ "$location" != "default" && "$loc_name" != "$location" ]] && continue
             [[ -z "$loc_path" ]] && continue
             loc_path="${loc_path/#\~/$HOME}"
             [[ -d "$loc_path" ]] || continue
             found=1
-            if [[ "$loc_name" == "default" ]]; then
-                printf 'Switch state (%s):\n' "$loc_path"
-            else
-                printf 'Switch state [%s] (%s):\n' "$loc_name" "$loc_path"
-            fi
-            local printed=0
+            local tag="[$loc_name]"
             for sym in "$loc_path"/*/; do
                 sym="${sym%/}"
                 [[ -L "$sym" ]] || continue
@@ -1252,8 +1251,7 @@ cmd_switch() {
                 local name; name=$(basename "$sym")
                 [[ -z "$workspace" || "$target" == "$workspace"/* ]] || continue
                 local rel="${target##*"$name"/}"
-                printf '  %-36s → %s\n' "$name" "$rel"
-                printed=1
+                lines+=("$(printf '%-12s %-32s → %s' "$tag" "$name" "$rel")")
             done
             # Per-project overrides for this location
             while IFS=$'\t' read -r ov_project ov_path; do
@@ -1264,10 +1262,8 @@ cmd_switch() {
                 local ov_target; ov_target=$(readlink "$ov_sym")
                 [[ -z "$workspace" || "$ov_target" == "$workspace"/* ]] || continue
                 local ov_rel="${ov_target##*"$ov_project"/}"
-                printf '  %-36s → %s  (%s)\n' "$ov_project" "$ov_rel" "$ov_sym"
-                printed=1
+                lines+=("$(printf '%-12s %-32s → %s' "$tag" "$ov_project" "$ov_rel")")
             done < <(_list_switch_overrides "$loc_name")
-            [[ $printed -eq 0 ]] && printf '  (none)\n'
         done < <(_list_switch_locations)
         if [[ $found -eq 0 ]]; then
             if [[ "$location" == "default" ]]; then
@@ -1276,6 +1272,14 @@ cmd_switch() {
                 printf 'Error: switch location "%s" not found in .gitree\n' "$location" >&2
             fi
             exit 1
+        fi
+        printf '%sRuntimes%s\n' "$b" "$r"
+        if [[ ${#lines[@]} -eq 0 ]]; then
+            printf '  (none)\n'
+        else
+            for line in "${lines[@]}"; do
+                printf '  %s\n' "$line"
+            done
         fi
         return
     fi
