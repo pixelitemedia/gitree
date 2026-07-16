@@ -79,6 +79,12 @@ gitree completion <bash|zsh>           # print shell completion script
 gitree --version
 ```
 
+### Verify the installed CLI
+```sh
+gitree --version
+```
+Use this command to confirm which Gitree build is installed.
+
 ## Config — `.gitree`
 
 Place a `.gitree` JSON file at the workspace root:
